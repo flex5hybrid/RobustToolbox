@@ -21,6 +21,26 @@
     { "bufferView": 2, "componentType": 5126, "count": 12, "type": "VEC2" },
     { "bufferView": 3, "componentType": 5123, "count": 12, "type": "SCALAR" }
   ],
+  "images": [
+    {
+      "name": "BootstrapChecker",
+      "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAYAAACp8Z5+AAAAJElEQVR4nGN82KT8P/qIPsNSm4sM0Uf0GZiQOUttLjIwElQBAIv9Ga2uq/9wAAAAAElFTkSuQmCC"
+    }
+  ],
+  "textures": [
+    { "source": 0 }
+  ],
+  "materials": [
+    {
+      "name": "BootstrapCheckerMaterial",
+      "pbrMetallicRoughness": {
+        "baseColorFactor": [1.0, 1.0, 1.0, 1.0],
+        "baseColorTexture": { "index": 0 },
+        "metallicFactor": 0.0,
+        "roughnessFactor": 0.8
+      }
+    }
+  ],
   "meshes": [
     {
       "name": "BootstrapPyramid",
@@ -32,6 +52,7 @@
             "TEXCOORD_0": 2
           },
           "indices": 3,
+          "material": 0,
           "mode": 4
         }
       ]
