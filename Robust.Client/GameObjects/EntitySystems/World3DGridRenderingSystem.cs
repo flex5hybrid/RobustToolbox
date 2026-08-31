@@ -98,28 +98,40 @@ internal sealed class World3DGridOverlay : Overlay
 
     protected internal override unsafe void Draw(in OverlayDrawArgs args)
     {
-        EnsureInitialized();
-
         var eye = args.Viewport.Eye;
         if (eye is null)
             return;
 
-        _vertices.Clear();
-        _grids.Clear();
-        _mapSystem.FindGridsIntersecting(args.MapId, args.WorldBounds, ref _grids);
+        // This overlay uses raw OpenGL while Clyde keeps its own GL state cache.
+        // Preserve the actual bindings Clyde had on entry so our pass is transparent
+        // to everything that renders after the world overlay.
+        GL.GetInteger(GetPName.CurrentProgram, out var previousProgram);
+        GL.GetInteger(GetPName.VertexArrayBinding, out var previousVertexArray);
+        GL.GetInteger(GetPName.ArrayBufferBinding, out var previousArrayBuffer);
+        GL.GetInteger(GetPName.DepthFunc, out var previousDepthFunc);
+        var previousDepthTest = GL.IsEnabled(EnableCap.DepthTest);
 
-        foreach (var grid in _grids)
-            AppendGrid(grid, args.WorldBounds);
-
-        GL.Viewport(0, 0, args.Viewport.Size.X, args.Viewport.Size.Y);
-        GL.ClearColor(0.025f, 0.035f, 0.055f, 1f);
-        GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
-        GL.Enable(EnableCap.DepthTest);
-        GL.DepthFunc(DepthFunction.Less);
-        GL.DepthMask(true);
-
-        if (_vertices.Count != 0)
+        try
         {
+            EnsureInitialized();
+
+            _vertices.Clear();
+            _grids.Clear();
+            _mapSystem.FindGridsIntersecting(args.MapId, args.WorldBounds, ref _grids);
+
+            foreach (var grid in _grids)
+                AppendGrid(grid, args.WorldBounds);
+
+            GL.Viewport(0, 0, args.Viewport.Size.X, args.Viewport.Size.Y);
+            GL.ClearColor(0.025f, 0.035f, 0.055f, 1f);
+            GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
+            GL.Enable(EnableCap.DepthTest);
+            GL.DepthFunc(DepthFunction.Less);
+            GL.DepthMask(true);
+
+            if (_vertices.Count == 0)
+                return;
+
             var target2 = eye.Position.Position + eye.Offset;
             var target = new Vector3(target2.X, target2.Y, 0f);
             var forward2 = eye.Rotation.ToWorldVec();
@@ -149,10 +161,18 @@ internal sealed class World3DGridOverlay : Overlay
 
             GL.DrawArrays(PrimitiveType.Triangles, 0, vertexData.Length / FloatsPerVertex);
         }
+        finally
+        {
+            GL.BindBuffer(BufferTarget.ArrayBuffer, (uint) previousArrayBuffer);
+            GL.BindVertexArray((uint) previousVertexArray);
+            GL.UseProgram((uint) previousProgram);
+            GL.DepthFunc((DepthFunction) previousDepthFunc);
 
-        GL.BindVertexArray(0);
-        GL.UseProgram(0);
-        GL.Disable(EnableCap.DepthTest);
+            if (previousDepthTest)
+                GL.Enable(EnableCap.DepthTest);
+            else
+                GL.Disable(EnableCap.DepthTest);
+        }
     }
 
     protected override void DisposeBehavior()
