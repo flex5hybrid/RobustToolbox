@@ -550,7 +550,7 @@ public abstract partial class SharedTransformSystem
 
             if (TerminatingOrDeleted(value.EntityId))
             {
-                Log.Error($"{ToPrettyString(uid)} is attempting to attach itself to a terminating entity {value.EntityId}. Trace: {Environment.StackTrace}");
+                Log.Error($"{ToPrettyString(uid)} is attempting to attach itself to a terminating entity {ToPrettyString(value.EntityId)}. Trace: {Environment.StackTrace}");
                 return;
             }
         }
@@ -1545,7 +1545,7 @@ public abstract partial class SharedTransformSystem
     public (Vector3 WorldPosition, Quaternion WorldRotation, Matrix4x4 WorldMatrix, Matrix4x4 InvWorldMatrix)
         GetWorldPositionRotationMatrixWithInv(EntityUid uid)
     {
-        return GetWorldPositionRotationMatrixWithInv(uid, XformQuery);
+        return GetWorldPositionRotationMatrixWithInv(XformQuery.GetComponent(uid), XformQuery);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1581,7 +1581,8 @@ public abstract partial class SharedTransformSystem
     {
         // TODO make this log an error?
         // SetCoordinates already does this when trying to move entities mid-deletion.
-        if (TerminatingOrDeleted(uid))n            return;
+        if (TerminatingOrDeleted(uid))
+            return;
 
         if (!XformQuery.Resolve(uid, ref xform, false))
             return;
