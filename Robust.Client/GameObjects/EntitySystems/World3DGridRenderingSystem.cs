@@ -46,6 +46,7 @@ internal sealed class World3DGridOverlay : Overlay
 {
     private const int FloatsPerVertex = 6;
     private const float FloorBottom = -0.12f;
+    private const float RenderRadius = 28f;
 
     private const string VertexShaderSource = """
         #version 330 core
@@ -72,13 +73,13 @@ internal sealed class World3DGridOverlay : Overlay
 
     private readonly SharedTransformSystem _transformSystem;
     private readonly SharedMapSystem _mapSystem;
-    private List<Entity<MapGridComponent>> _grids = new();
     private readonly List<float> _vertices = new(64 * 1024);
 
     private uint _vertexArray;
     private uint _vertexBuffer;
     private uint _program;
     private int _mvpLocation = -1;
+    private int _diagnosticFrames;
     private bool _initialized;
 
     public override OverlaySpace Space => OverlaySpace.WorldSpace;
@@ -115,11 +116,24 @@ internal sealed class World3DGridOverlay : Overlay
             EnsureInitialized();
 
             _vertices.Clear();
-            _grids.Clear();
-            _mapSystem.FindGridsIntersecting(args.MapId, args.WorldBounds, ref _grids);
 
-            foreach (var grid in _grids)
-                AppendGrid(grid, args.WorldBounds);
+            // Do not use the legacy 2D viewport bounds to decide what exists in our perspective view.
+            // Enumerate the actual live grids on the eye's map, then select chunks in grid-local space
+            // around the real IEye position.
+            var eyeWorld = eye.Position.Position + eye.Offset;
+            var gridCount = 0;
+            foreach (var grid in _mapSystem.GetAllGrids(args.MapId))
+            {
+                gridCount++;
+                AppendGrid(grid, eyeWorld);
+            }
+
+            if (++_diagnosticFrames >= 300)
+            {
+                _diagnosticFrames = 0;
+                Console.WriteLine(
+                    $"[SS14-3D] map={args.MapId}; eye={eyeWorld.X:F1},{eyeWorld.Y:F1}; grids={gridCount}; vertices={_vertices.Count / FloatsPerVertex}");
+            }
 
             // Do not erase the normal SS14 world unless we actually have 3D geometry to replace it with.
             if (_vertices.Count == 0)
@@ -134,8 +148,7 @@ internal sealed class World3DGridOverlay : Overlay
             GL.DepthFunc(DepthFunction.Less);
             GL.DepthMask(true);
 
-            var target2 = eye.Position.Position + eye.Offset;
-            var target = new Vector3(target2.X, target2.Y, 0f);
+            var target = new Vector3(eyeWorld.X, eyeWorld.Y, 0f);
             var forward2 = eye.Rotation.ToWorldVec();
             var camera = target + new Vector3(-forward2.X * 9f, -forward2.Y * 9f, 7f);
             var view = Matrix4x4.CreateLookAt(camera, target, Vector3.UnitZ);
@@ -202,39 +215,56 @@ internal sealed class World3DGridOverlay : Overlay
         base.DisposeBehavior();
     }
 
-    private void AppendGrid(Entity<MapGridComponent> grid, Box2Rotated worldBounds)
+    private void AppendGrid(Entity<MapGridComponent> grid, Vector2 eyeWorld)
     {
         var worldMatrix = _transformSystem.GetWorldMatrix(grid);
-        var chunks = _mapSystem.GetMapChunks(grid.Owner, grid.Comp, worldBounds);
+        if (!Matrix3x2.Invert(worldMatrix, out var inverseWorldMatrix))
+            return;
 
-        while (chunks.MoveNext(out var chunk))
+        var eyeLocal = Vector2.Transform(eyeWorld, inverseWorldMatrix);
+        var chunkSize = grid.Comp.ChunkSize;
+        var radius = new Vector2(RenderRadius, RenderRadius);
+        var minChunk = SharedMapSystem.GetChunkIndices(eyeLocal - radius, chunkSize);
+        var maxChunk = SharedMapSystem.GetChunkIndices(eyeLocal + radius, chunkSize);
+
+        for (var chunkX = minChunk.X; chunkX <= maxChunk.X; chunkX++)
         {
-            var chunkSize = grid.Comp.ChunkSize;
-            var chunkOrigin = chunk.Indices * chunkSize;
-
-            for (ushort x = 0; x < chunkSize; x++)
+            for (var chunkY = minChunk.Y; chunkY <= maxChunk.Y; chunkY++)
             {
-                for (ushort y = 0; y < chunkSize; y++)
+                if (!grid.Comp.Chunks.TryGetValue(new Vector2i(chunkX, chunkY), out var chunk))
+                    continue;
+
+                var chunkOrigin = chunk.Indices * chunkSize;
+
+                for (ushort x = 0; x < chunkSize; x++)
                 {
-                    var tile = chunk.GetTile(x, y);
-                    if (tile.IsEmpty)
-                        continue;
+                    for (ushort y = 0; y < chunkSize; y++)
+                    {
+                        var tile = chunk.GetTile(x, y);
+                        if (tile.IsEmpty)
+                            continue;
 
-                    var gridX = x + chunkOrigin.X;
-                    var gridY = y + chunkOrigin.Y;
-                    var color = TileColor(tile.TypeId);
+                        var gridX = x + chunkOrigin.X;
+                        var gridY = y + chunkOrigin.Y;
+                        var localCenter = new Vector2(gridX + 0.5f, gridY + 0.5f);
+                        if (MathF.Abs(localCenter.X - eyeLocal.X) > RenderRadius ||
+                            MathF.Abs(localCenter.Y - eyeLocal.Y) > RenderRadius)
+                            continue;
 
-                    var p0 = Vector2.Transform(new Vector2(gridX, gridY), worldMatrix);
-                    var p1 = Vector2.Transform(new Vector2(gridX + 1, gridY), worldMatrix);
-                    var p2 = Vector2.Transform(new Vector2(gridX + 1, gridY + 1), worldMatrix);
-                    var p3 = Vector2.Transform(new Vector2(gridX, gridY + 1), worldMatrix);
+                        var color = TileColor(tile.TypeId);
 
-                    AddQuad(p0, p1, p2, p3, 0f, color);
+                        var p0 = Vector2.Transform(new Vector2(gridX, gridY), worldMatrix);
+                        var p1 = Vector2.Transform(new Vector2(gridX + 1, gridY), worldMatrix);
+                        var p2 = Vector2.Transform(new Vector2(gridX + 1, gridY + 1), worldMatrix);
+                        var p3 = Vector2.Transform(new Vector2(gridX, gridY + 1), worldMatrix);
 
-                    AddExposedSide(grid.Comp, new Vector2i(gridX, gridY - 1), p0, p1, color * 0.62f);
-                    AddExposedSide(grid.Comp, new Vector2i(gridX + 1, gridY), p1, p2, color * 0.70f);
-                    AddExposedSide(grid.Comp, new Vector2i(gridX, gridY + 1), p2, p3, color * 0.78f);
-                    AddExposedSide(grid.Comp, new Vector2i(gridX - 1, gridY), p3, p0, color * 0.66f);
+                        AddQuad(p0, p1, p2, p3, 0f, color);
+
+                        AddExposedSide(grid.Comp, new Vector2i(gridX, gridY - 1), p0, p1, color * 0.62f);
+                        AddExposedSide(grid.Comp, new Vector2i(gridX + 1, gridY), p1, p2, color * 0.70f);
+                        AddExposedSide(grid.Comp, new Vector2i(gridX, gridY + 1), p2, p3, color * 0.78f);
+                        AddExposedSide(grid.Comp, new Vector2i(gridX - 1, gridY), p3, p0, color * 0.66f);
+                    }
                 }
             }
         }
