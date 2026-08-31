@@ -1,5 +1,10 @@
+using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
+using System.Linq;
 using System.Numerics;
+using System.Threading;
 using OpenToolkit.Graphics.OpenGL4;
 using Robust.Shared.Maths;
 using Robust.Shared3D;
@@ -421,27 +426,48 @@ internal static class NetworkedProgram
     {
         var vertexShader = CompileShader(ShaderType.VertexShader, vertexSource);
         var fragmentShader = CompileShader(ShaderType.FragmentShader, fragmentSource);
-        var program = GL.CreateProgram();
-        GL.AttachShader((int) program, vertexShader);
-        GL.AttachShader((int) program, fragmentShader);
-        GL.LinkProgram((int) program);
-        GL.GetProgram((int) program, GetProgramParameterName.LinkStatus, out var linked);
-        GL.DeleteShader(vertexShader);
-        GL.DeleteShader(fragmentShader);
-        if (linked == 0)
-            throw new InvalidOperationException($"Shader link failed: {GL.GetProgramInfoLog((int) program)}");
-        return program;
+        var shaderProgram = (uint) GL.CreateProgram();
+
+        try
+        {
+            GL.AttachShader(shaderProgram, vertexShader);
+            GL.AttachShader(shaderProgram, fragmentShader);
+            GL.LinkProgram(shaderProgram);
+            GL.GetProgram(shaderProgram, GetProgramParameterName.LinkStatus, out var linked);
+            if (linked != 1)
+            {
+                throw new InvalidOperationException(
+                    $"Networked 3D shader link failed: {GL.GetProgramInfoLog((int) shaderProgram)}");
+            }
+
+            return shaderProgram;
+        }
+        catch
+        {
+            GL.DeleteProgram(shaderProgram);
+            throw;
+        }
+        finally
+        {
+            GL.DetachShader(shaderProgram, vertexShader);
+            GL.DetachShader(shaderProgram, fragmentShader);
+            GL.DeleteShader(vertexShader);
+            GL.DeleteShader(fragmentShader);
+        }
     }
 
-    private static int CompileShader(ShaderType type, string source)
+    private static uint CompileShader(ShaderType type, string source)
     {
-        var shader = GL.CreateShader(type);
-        GL.ShaderSource(shader, source);
+        var shader = (uint) GL.CreateShader(type);
+        GL.ShaderSource((int) shader, source);
         GL.CompileShader(shader);
         GL.GetShader(shader, ShaderParameter.CompileStatus, out var compiled);
-        if (compiled == 0)
-            throw new InvalidOperationException($"Shader compile failed: {GL.GetShaderInfoLog(shader)}");
-        return shader;
+        if (compiled == 1)
+            return shader;
+
+        var message = GL.GetShaderInfoLog((int) shader);
+        GL.DeleteShader(shader);
+        throw new InvalidOperationException($"Networked 3D shader compilation failed: {message}");
     }
 
     private static float[] CreateCubeVertices()
@@ -470,7 +496,14 @@ internal static class NetworkedProgram
         GL.PixelStore(PixelStoreParameter.PackAlignment, 4);
         fixed (byte* pixelPointer = pixels)
         {
-            GL.ReadPixels(0, 0, width, height, PixelFormat.Bgr, PixelType.UnsignedByte, (IntPtr) pixelPointer);
+            GL.ReadPixels(
+                0,
+                0,
+                width,
+                height,
+                PixelFormat.Bgr,
+                PixelType.UnsignedByte,
+                (IntPtr) pixelPointer);
         }
 
         var directory = Path.GetDirectoryName(path);
@@ -518,8 +551,7 @@ internal static class NetworkedProgram
 
     private static int ReadInteger(string[] args, string prefix, int fallback)
     {
-        var value = ReadNullableInteger(args, prefix);
-        return value ?? fallback;
+        return ReadNullableInteger(args, prefix) ?? fallback;
     }
 
     private static int? ReadNullableInteger(string[] args, string prefix)
