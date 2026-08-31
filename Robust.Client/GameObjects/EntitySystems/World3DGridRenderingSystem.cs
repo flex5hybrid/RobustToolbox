@@ -72,7 +72,7 @@ internal sealed class World3DGridOverlay : Overlay
 
     private readonly SharedTransformSystem _transformSystem;
     private readonly SharedMapSystem _mapSystem;
-    private readonly List<Entity<MapGridComponent>> _grids = new();
+    private List<Entity<MapGridComponent>> _grids = new();
     private readonly List<float> _vertices = new(64 * 1024);
 
     private uint _vertexArray;
