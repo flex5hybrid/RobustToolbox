@@ -25,7 +25,7 @@ public sealed class MeshData3D
 
         foreach (var index in Indices)
         {
-            if (index >= Vertices.Length)
+            if (index >= (uint) Vertices.Length)
                 throw new ArgumentOutOfRangeException(nameof(indices), index, "Mesh index points outside the vertex array.");
         }
     }
