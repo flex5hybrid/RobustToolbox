@@ -31,6 +31,8 @@ internal sealed class NetworkClient3D : IDisposable
 
     public int PlayerId { get; private set; }
     public float FixedDelta { get; private set; } = AuthoritativeWorld3D.FixedDelta;
+    public string WorldResource { get; private set; } = string.Empty;
+    public string WorldSha256 { get; private set; } = string.Empty;
     public bool Connected => Volatile.Read(ref _disposed) == 0 &&
                              _socket.Connected &&
                              !_cancellation.IsCancellationRequested;
@@ -61,9 +63,13 @@ internal sealed class NetworkClient3D : IDisposable
                 throw new InvalidOperationException(
                     $"3D protocol mismatch: server={hello.ProtocolVersion}, client={NetworkProtocol3D.Version}");
             }
+            if (string.IsNullOrWhiteSpace(hello.WorldResource) || string.IsNullOrWhiteSpace(hello.WorldSha256))
+                throw new InvalidOperationException("Server3D did not identify its authoritative world resource.");
 
             client.PlayerId = hello.PlayerId;
             client.FixedDelta = hello.FixedDelta > 0f ? hello.FixedDelta : AuthoritativeWorld3D.FixedDelta;
+            client.WorldResource = hello.WorldResource;
+            client.WorldSha256 = hello.WorldSha256;
             return client;
         }
         catch
