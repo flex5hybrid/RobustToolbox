@@ -20,5 +20,16 @@
     <ProjectReference Include="..\Robust.Shared3D\Robust.Shared3D.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="Assets\Models\**\*.gltf">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>Assets\Models\%(RecursiveDir)%(Filename)%(Extension)</Link>
+    </Content>
+    <Content Include="Assets\Models\**\*.bin">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>Assets\Models\%(RecursiveDir)%(Filename)%(Extension)</Link>
+    </Content>
+  </ItemGroup>
+
   <Import Project="..\MSBuild\Robust.Properties.targets" />
 </Project>
