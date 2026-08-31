@@ -1,6 +1,10 @@
+using System;
 using System.Collections.Concurrent;
+using System.IO;
 using System.Net.Sockets;
+using System.Threading;
 using System.Threading.Channels;
+using System.Threading.Tasks;
 using Robust.Shared3D;
 
 namespace Robust.Client3D;
@@ -23,9 +27,13 @@ internal sealed class NetworkClient3D : IDisposable
         TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Task _readerTask;
     private readonly Task _writerTask;
+    private int _disposed;
 
     public int PlayerId { get; private set; }
-    public bool Connected => _socket.Connected && !_cancellation.IsCancellationRequested;
+    public float FixedDelta { get; private set; } = AuthoritativeWorld3D.FixedDelta;
+    public bool Connected => Volatile.Read(ref _disposed) == 0 &&
+                             _socket.Connected &&
+                             !_cancellation.IsCancellationRequested;
 
     private NetworkClient3D(TcpClient socket)
     {
@@ -55,6 +63,7 @@ internal sealed class NetworkClient3D : IDisposable
             }
 
             client.PlayerId = hello.PlayerId;
+            client.FixedDelta = hello.FixedDelta > 0f ? hello.FixedDelta : AuthoritativeWorld3D.FixedDelta;
             return client;
         }
         catch
@@ -66,13 +75,25 @@ internal sealed class NetworkClient3D : IDisposable
 
     public bool QueueInput(InputMessage3D input)
     {
-        return _outgoing.Writer.TryWrite(input);
+        return Volatile.Read(ref _disposed) == 0 && _outgoing.Writer.TryWrite(input);
+    }
+
+    public bool TryReadSnapshot(out SnapshotMessage3D snapshot)
+    {
+        if (_snapshots.TryDequeue(out var next))
+        {
+            snapshot = next;
+            return true;
+        }
+
+        snapshot = null!;
+        return false;
     }
 
     public bool TryReadLatestSnapshot(out SnapshotMessage3D snapshot)
     {
         snapshot = null!;
-        while (_snapshots.TryDequeue(out var next))
+        while (TryReadSnapshot(out var next))
             snapshot = next;
 
         return snapshot is not null;
@@ -104,9 +125,13 @@ internal sealed class NetworkClient3D : IDisposable
                 }
             }
         }
-        catch (Exception exception) when (exception is IOException or SocketException or OperationCanceledException)
+        catch (Exception exception) when (exception is IOException or
+                                                 SocketException or
+                                                 OperationCanceledException or
+                                                 ObjectDisposedException)
         {
-            _hello.TrySetException(exception);
+            if (!_hello.Task.IsCompleted)
+                _hello.TrySetException(exception);
         }
         finally
         {
@@ -125,7 +150,10 @@ internal sealed class NetworkClient3D : IDisposable
                     cancellationToken);
             }
         }
-        catch (Exception exception) when (exception is IOException or SocketException or OperationCanceledException)
+        catch (Exception exception) when (exception is IOException or
+                                                 SocketException or
+                                                 OperationCanceledException or
+                                                 ObjectDisposedException)
         {
         }
         finally
@@ -136,7 +164,7 @@ internal sealed class NetworkClient3D : IDisposable
 
     public void Dispose()
     {
-        if (_cancellation.IsCancellationRequested)
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
             return;
 
         _cancellation.Cancel();

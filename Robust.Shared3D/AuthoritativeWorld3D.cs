@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 
 namespace Robust.Shared3D;
@@ -54,13 +56,15 @@ public sealed class AuthoritativeWorld3D
 
 public sealed class PlayerEntity3D
 {
+    private readonly Queue<InputMessage3D> _pendingInputs = new();
     private Vector2 _movement;
-    private bool _jumpQueued;
+    private ulong _lastReceivedInput;
 
     public int PlayerId { get; }
     public KinematicCharacter3D Character { get; }
     public float FacingYaw { get; private set; }
     public ulong AcknowledgedInput { get; private set; }
+    public int PendingInputCount => _pendingInputs.Count;
 
     public PlayerEntity3D(int playerId, Vector3 spawnPosition)
     {
@@ -70,7 +74,7 @@ public sealed class PlayerEntity3D
 
     public bool ApplyInput(InputMessage3D input)
     {
-        if (input.Sequence <= AcknowledgedInput)
+        if (input.Sequence <= _lastReceivedInput)
             return false;
 
         var movement = new Vector2(input.MovementX, input.MovementY);
@@ -79,17 +83,28 @@ public sealed class PlayerEntity3D
         if (movement.LengthSquared() > 1f)
             movement = Vector2.Normalize(movement);
 
-        _movement = movement;
-        _jumpQueued |= input.Jump;
-        FacingYaw = float.IsFinite(input.FacingYaw) ? input.FacingYaw : 0f;
-        AcknowledgedInput = input.Sequence;
+        _pendingInputs.Enqueue(input with
+        {
+            MovementX = movement.X,
+            MovementY = movement.Y,
+            FacingYaw = float.IsFinite(input.FacingYaw) ? input.FacingYaw : 0f,
+        });
+        _lastReceivedInput = input.Sequence;
         return true;
     }
 
     public void Step(float deltaTime)
     {
-        Character.Step(new CharacterInput3D(_movement, _jumpQueued), deltaTime);
-        _jumpQueued = false;
+        var jump = false;
+        if (_pendingInputs.TryDequeue(out var input))
+        {
+            _movement = new Vector2(input.MovementX, input.MovementY);
+            jump = input.Jump;
+            FacingYaw = input.FacingYaw;
+            AcknowledgedInput = input.Sequence;
+        }
+
+        Character.Step(new CharacterInput3D(_movement, jump), deltaTime);
     }
 
     public PlayerSnapshot3D CreateSnapshot()
