@@ -8,12 +8,23 @@ namespace Robust.Server3D;
 
 internal static class Program
 {
+    private const string DefaultWorldResource = "Worlds/bootstrap-world3d.json";
+
     public static async Task<int> Main(string[] args)
     {
         try
         {
             var port = ReadInteger(args, "--port=", NetworkProtocol3D.DefaultPort);
             var tickLimit = ReadInteger(args, "--ticks=", 0);
+            var worldResource = ReadString(args, "--world=", DefaultWorldResource);
+            var worldIdentityProbe = WorldResourceIdentity3D.Create(worldResource, ReadOnlySpan<byte>.Empty);
+            var worldPath = Path.Combine(
+                AppContext.BaseDirectory,
+                worldIdentityProbe.ResourcePath.Replace('/', Path.DirectorySeparatorChar));
+            var worldBytes = File.ReadAllBytes(worldPath);
+            var worldIdentity = WorldResourceIdentity3D.Create(worldResource, worldBytes);
+            var worldDefinition = WorldDefinition3DLoader.Load(worldBytes);
+
             using var cancellation = new CancellationTokenSource();
             Console.CancelKeyPress += (_, eventArgs) =>
             {
@@ -21,7 +32,10 @@ internal static class Program
                 cancellation.Cancel();
             };
 
-            var server = new AuthoritativeServer3D(port);
+            var server = new AuthoritativeServer3D(
+                port,
+                worldDefinition,
+                worldIdentity);
             await server.RunAsync(tickLimit > 0 ? tickLimit : null, cancellation.Token);
             return 0;
         }
@@ -45,6 +59,20 @@ internal static class Program
 
         return fallback;
     }
+
+    private static string ReadString(string[] args, string prefix, string fallback)
+    {
+        foreach (var argument in args)
+        {
+            if (argument.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrWhiteSpace(argument[prefix.Length..]))
+            {
+                return argument[prefix.Length..];
+            }
+        }
+
+        return fallback;
+    }
 }
 
 internal sealed class AuthoritativeServer3D
@@ -54,12 +82,18 @@ internal sealed class AuthoritativeServer3D
     private readonly TcpListener _listener;
     private readonly ConcurrentQueue<ServerCommand3D> _commands = new();
     private readonly Dictionary<int, ClientConnection3D> _clients = new();
-    private readonly AuthoritativeWorld3D _world = new();
+    private readonly AuthoritativeWorld3D _world;
+    private readonly WorldResourceIdentity3D _worldIdentity;
     private int _nextPlayerId;
 
-    public AuthoritativeServer3D(int port)
+    public AuthoritativeServer3D(
+        int port,
+        WorldDefinition3D worldDefinition,
+        WorldResourceIdentity3D worldIdentity)
     {
         _listener = new TcpListener(IPAddress.Loopback, port);
+        _world = new AuthoritativeWorld3D(worldDefinition);
+        _worldIdentity = worldIdentity;
     }
 
     public async Task RunAsync(int? tickLimit, CancellationToken cancellationToken)
@@ -67,6 +101,9 @@ internal sealed class AuthoritativeServer3D
         _listener.Start();
         var endpoint = (IPEndPoint) _listener.LocalEndpoint;
         Console.WriteLine($"Server3D listening on {endpoint.Address}:{endpoint.Port}");
+        Console.WriteLine(
+            $"World: {_world.Definition?.Name ?? "legacy demo"} " +
+            $"({_worldIdentity.ResourcePath}, sha256={_worldIdentity.Sha256})");
 
         using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var acceptTask = AcceptLoopAsync(linkedCancellation.Token);
@@ -148,6 +185,8 @@ internal sealed class AuthoritativeServer3D
                     {
                         PlayerId = connect.Connection.PlayerId,
                         FixedDelta = AuthoritativeWorld3D.FixedDelta,
+                        WorldResource = _worldIdentity.ResourcePath,
+                        WorldSha256 = _worldIdentity.Sha256,
                     }, CancellationToken.None);
                     Console.WriteLine($"Player {connect.Connection.PlayerId} connected");
                     break;
