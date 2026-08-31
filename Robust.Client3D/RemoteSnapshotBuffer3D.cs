@@ -42,7 +42,7 @@ public sealed class RemoteSnapshotBuffer3D
             return false;
         }
 
-        if (_samples.Count == 1 || renderTick <= _samples[0].ServerTick)
+        if (renderTick <= _samples[0].ServerTick)
         {
             player = Convert(_samples[0].Snapshot);
             return true;
