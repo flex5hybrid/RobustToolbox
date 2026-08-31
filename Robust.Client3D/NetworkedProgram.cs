@@ -6,6 +6,7 @@ using System.Linq;
 using System.Numerics;
 using System.Threading;
 using OpenToolkit.Graphics.OpenGL4;
+using Robust.Client3D.Graphics;
 using Robust.Shared.Maths;
 using Robust.Shared3D;
 using SDL3;
@@ -56,9 +57,24 @@ internal static class NetworkedProgram
             .GetAwaiter()
             .GetResult();
 
+        ClientWorldSession3D worldSession;
+        try
+        {
+            worldSession = ClientWorldSession3D.LoadAndVerify(network.WorldResource, network.WorldSha256);
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"Failed to load authoritative 3D world: {exception}");
+            return 1;
+        }
+
+        var worldDefinition = worldSession.Definition;
         Console.WriteLine(
             $"Connected to Server3D at {host}:{port} as player {network.PlayerId}; " +
             $"fixedDelta={network.FixedDelta:F6}");
+        Console.WriteLine(
+            $"World loaded: {worldDefinition.Name} ({worldSession.Identity.ResourcePath}, " +
+            $"sha256={worldSession.Identity.Sha256})");
 
         if (!SDL.SDL_Init(SDL.SDL_InitFlags.SDL_INIT_VIDEO | SDL.SDL_InitFlags.SDL_INIT_EVENTS))
         {
@@ -71,6 +87,7 @@ internal static class NetworkedProgram
         uint vertexArray = 0;
         uint vertexBuffer = 0;
         uint program = 0;
+        WorldSceneRenderer3D? worldRenderer = null;
 
         try
         {
@@ -86,7 +103,7 @@ internal static class NetworkedProgram
             SDL.SDL_GL_SetAttribute(SDL.SDL_GLAttr.SDL_GL_DEPTH_SIZE, 24);
 
             window = SDL.SDL_CreateWindow(
-                $"RussianCM 3D multiplayer - player {network.PlayerId}",
+                $"RussianCM 3D - {worldDefinition.Name} - player {network.PlayerId}",
                 1280,
                 720,
                 SDL.SDL_WindowFlags.SDL_WINDOW_OPENGL | SDL.SDL_WindowFlags.SDL_WINDOW_RESIZABLE);
@@ -128,11 +145,15 @@ internal static class NetworkedProgram
             GL.DepthFunc(DepthFunction.Less);
             GL.ClearColor(0.025f, 0.035f, 0.065f, 1f);
 
+            worldRenderer = new WorldSceneRenderer3D(worldDefinition);
+
             var interactive = frameLimit is null && !autoPlay;
             if (interactive && !SDL.SDL_SetWindowRelativeMouseMode(window, true))
                 Console.Error.WriteLine($"Relative mouse mode unavailable: {SDL.SDL_GetError()}");
 
-            var predictor = new PredictedPlayer3D(DemoWorld3D.GetPlayerSpawnPosition(network.PlayerId));
+            var predictor = new PredictedPlayer3D(
+                worldDefinition.GetPlayerSpawnPosition(network.PlayerId),
+                worldDefinition.CollisionBounds);
             var remotePlayers = new Dictionary<int, RemoteSnapshotBuffer3D>();
             long latestServerTick = 0;
 
@@ -272,7 +293,11 @@ internal static class NetworkedProgram
                     MathF.Sin(pitch)));
                 var cameraTarget = predictor.Position + Vector3.UnitZ * 0.35f;
                 var cameraDirection = -lookDirection;
-                var cameraDistance = ResolveCameraDistance(cameraTarget, cameraDirection, 3.5f);
+                var cameraDistance = ResolveCameraDistance(
+                    cameraTarget,
+                    cameraDirection,
+                    3.5f,
+                    worldDefinition.CollisionBounds);
                 var camera = cameraTarget + cameraDirection * cameraDistance;
                 var view = Matrix4x4.CreateLookAt(camera, cameraTarget, Vector3.UnitZ);
                 var projection = Matrix4x4.CreatePerspectiveFieldOfView(
@@ -282,8 +307,15 @@ internal static class NetworkedProgram
                     100f);
 
                 GL.UseProgram(program);
+                DrawWorld(
+                    worldDefinition,
+                    worldRenderer,
+                    vertexArray,
+                    mvpLocation,
+                    tintLocation,
+                    view,
+                    projection);
                 GL.BindVertexArray(vertexArray);
-                DrawWorld(mvpLocation, tintLocation, view, projection);
                 DrawPlayer(
                     predictor.Position,
                     predictor.FacingYaw,
@@ -336,6 +368,7 @@ internal static class NetworkedProgram
         }
         finally
         {
+            worldRenderer?.Dispose();
             if (vertexBuffer != 0)
                 GL.DeleteBuffer(vertexBuffer);
             if (vertexArray != 0)
@@ -350,11 +383,15 @@ internal static class NetworkedProgram
         }
     }
 
-    private static float ResolveCameraDistance(Vector3 target, Vector3 direction, float desiredDistance)
+    private static float ResolveCameraDistance(
+        Vector3 target,
+        Vector3 direction,
+        float desiredDistance,
+        IReadOnlyList<Box3> collisionBounds)
     {
         var ray = new Ray3(target, direction);
         var distance = desiredDistance;
-        foreach (var bounds in DemoWorld3D.CollisionBounds)
+        foreach (var bounds in collisionBounds)
         {
             if (ray.TryIntersect(bounds, out var hitDistance) && hitDistance <= desiredDistance)
                 distance = MathF.Min(distance, MathF.Max(0.4f, hitDistance - 0.08f));
@@ -364,21 +401,46 @@ internal static class NetworkedProgram
     }
 
     private static unsafe void DrawWorld(
+        WorldDefinition3D world,
+        WorldSceneRenderer3D renderer,
+        uint cubeVertexArray,
         int mvpLocation,
         int tintLocation,
         Matrix4x4 view,
         Matrix4x4 projection)
     {
-        foreach (var worldObject in DemoWorld3D.Objects)
+        foreach (var worldObject in world.Objects)
         {
+            var tint = WorldTint(worldObject);
+            if (worldObject.ModelPath is not null)
+            {
+                var mvp = worldObject.Transform.Matrix * view * projection;
+                GL.UniformMatrix4(mvpLocation, 1, false, (float*) &mvp);
+                GL.Uniform3(tintLocation, tint.X, tint.Y, tint.Z);
+                renderer.GetMesh(worldObject.ModelPath).Draw();
+                continue;
+            }
+
+            GL.BindVertexArray(cubeVertexArray);
             DrawCube(
                 worldObject.Transform,
-                new Vector3(0.25f, 0.55f, 0.75f),
+                tint,
                 mvpLocation,
                 tintLocation,
                 view,
                 projection);
         }
+    }
+
+    private static Vector3 WorldTint(WorldObjectDefinition3D worldObject)
+    {
+        if (worldObject.ModelPath is not null)
+            return new Vector3(0.95f, 0.62f, 0.16f);
+        if (worldObject.Id.Equals("floor", StringComparison.OrdinalIgnoreCase))
+            return new Vector3(0.18f, 0.24f, 0.3f);
+        if (worldObject.Id.StartsWith("wall-", StringComparison.OrdinalIgnoreCase))
+            return new Vector3(0.2f, 0.42f, 0.58f);
+        return new Vector3(0.25f, 0.55f, 0.75f);
     }
 
     private static unsafe void DrawPlayer(

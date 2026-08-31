@@ -1,5 +1,7 @@
+using System;
 using System.Collections.Generic;
 using System.Numerics;
+using Robust.Shared.Maths;
 using Robust.Shared3D;
 
 namespace Robust.Client3D;
@@ -17,8 +19,16 @@ public sealed class PredictedPlayer3D
     public int PendingInputCount => _pendingInputs.Count;
 
     public PredictedPlayer3D(Vector3 spawnPosition)
+        : this(spawnPosition, DemoWorld3D.CollisionBounds)
     {
-        _character = new KinematicCharacter3D(spawnPosition, DemoWorld3D.CollisionBounds);
+    }
+
+    public PredictedPlayer3D(
+        Vector3 spawnPosition,
+        IReadOnlyList<Box3> collisionBounds)
+    {
+        ArgumentNullException.ThrowIfNull(collisionBounds);
+        _character = new KinematicCharacter3D(spawnPosition, collisionBounds);
     }
 
     public InputMessage3D Step(Vector2 movement, bool jump, float facingYaw, float deltaTime)

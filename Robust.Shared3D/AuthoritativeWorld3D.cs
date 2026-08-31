@@ -1,6 +1,8 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
+using Robust.Shared.Maths;
 
 namespace Robust.Shared3D;
 
@@ -12,13 +14,35 @@ public sealed class AuthoritativeWorld3D
     public const float FixedDelta = 1f / 120f;
 
     private readonly Dictionary<int, PlayerEntity3D> _players = new();
+    private readonly Func<int, Vector3> _spawnResolver;
+    private readonly IReadOnlyList<Box3> _collisionBounds;
 
     public long Tick { get; private set; }
     public IReadOnlyCollection<PlayerEntity3D> Players => _players.Values;
+    public WorldDefinition3D? Definition { get; }
+    public IReadOnlyList<Box3> CollisionBounds => _collisionBounds;
+
+    public AuthoritativeWorld3D(WorldDefinition3D? definition = null)
+    {
+        Definition = definition;
+        if (definition is null)
+        {
+            _spawnResolver = DemoWorld3D.GetPlayerSpawnPosition;
+            _collisionBounds = DemoWorld3D.CollisionBounds;
+        }
+        else
+        {
+            _spawnResolver = definition.GetPlayerSpawnPosition;
+            _collisionBounds = definition.CollisionBounds;
+        }
+    }
 
     public PlayerEntity3D AddPlayer(int playerId)
     {
-        var player = new PlayerEntity3D(playerId, DemoWorld3D.GetPlayerSpawnPosition(playerId));
+        var player = new PlayerEntity3D(
+            playerId,
+            _spawnResolver(playerId),
+            _collisionBounds);
         _players.Add(playerId, player);
         return player;
     }
@@ -67,9 +91,18 @@ public sealed class PlayerEntity3D
     public int PendingInputCount => _pendingInputs.Count;
 
     public PlayerEntity3D(int playerId, Vector3 spawnPosition)
+        : this(playerId, spawnPosition, DemoWorld3D.CollisionBounds)
     {
+    }
+
+    public PlayerEntity3D(
+        int playerId,
+        Vector3 spawnPosition,
+        IReadOnlyList<Box3> collisionBounds)
+    {
+        ArgumentNullException.ThrowIfNull(collisionBounds);
         PlayerId = playerId;
-        Character = new KinematicCharacter3D(spawnPosition, DemoWorld3D.CollisionBounds);
+        Character = new KinematicCharacter3D(spawnPosition, collisionBounds);
     }
 
     public bool ApplyInput(InputMessage3D input)

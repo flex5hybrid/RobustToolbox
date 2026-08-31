@@ -15,16 +15,24 @@ public sealed class WorldSceneRenderer3D : IDisposable
     {
         ArgumentNullException.ThrowIfNull(definition);
 
-        foreach (var worldObject in definition.Objects)
+        try
         {
-            if (worldObject.ModelPath is null || _meshes.ContainsKey(worldObject.ModelPath))
-                continue;
+            foreach (var worldObject in definition.Objects)
+            {
+                if (worldObject.ModelPath is null || _meshes.ContainsKey(worldObject.ModelPath))
+                    continue;
 
-            var meshData = LoadMesh(worldObject.ModelPath);
-            _meshes.Add(worldObject.ModelPath, new GpuMesh3D(meshData));
-            Console.WriteLine(
-                $"Loaded world mesh {worldObject.ModelPath}: vertices={meshData.Vertices.Length}; " +
-                $"triangles={meshData.Indices.Length / 3}");
+                var meshData = LoadMesh(worldObject.ModelPath);
+                _meshes.Add(worldObject.ModelPath, new GpuMesh3D(meshData));
+                Console.WriteLine(
+                    $"Loaded world mesh {worldObject.ModelPath}: vertices={meshData.Vertices.Length}; " +
+                    $"triangles={meshData.Indices.Length / 3}");
+            }
+        }
+        catch
+        {
+            Dispose();
+            throw;
         }
     }
 
