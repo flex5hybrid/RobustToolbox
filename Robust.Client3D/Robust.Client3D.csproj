@@ -29,6 +29,10 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>Assets\Models\%(RecursiveDir)%(Filename)%(Extension)</Link>
     </Content>
+    <Content Include="..\Robust.Shared3D\Worlds\**\*.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>Worlds\%(RecursiveDir)%(Filename)%(Extension)</Link>
+    </Content>
   </ItemGroup>
 
   <Import Project="..\MSBuild\Robust.Properties.targets" />
