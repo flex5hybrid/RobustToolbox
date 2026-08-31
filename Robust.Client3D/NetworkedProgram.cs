@@ -20,23 +20,45 @@ internal static class NetworkedProgram
     private const string VertexShaderSource = """
         #version 330 core
         layout(location = 0) in vec3 aPosition;
+        layout(location = 1) in vec3 aNormal;
+        layout(location = 2) in vec2 aTexCoord;
+        uniform mat4 uModel;
         uniform mat4 uMvp;
-        uniform vec3 uTint;
-        out vec3 vColor;
+        out vec3 vNormal;
+        out vec2 vTexCoord;
         void main()
         {
-            vColor = uTint;
+            vNormal = mat3(transpose(inverse(uModel))) * aNormal;
+            vTexCoord = aTexCoord;
             gl_Position = uMvp * vec4(aPosition, 1.0);
         }
         """;
 
     private const string FragmentShaderSource = """
         #version 330 core
-        in vec3 vColor;
+        in vec3 vNormal;
+        in vec2 vTexCoord;
+        uniform vec3 uTint;
+        uniform vec4 uBaseColorFactor;
+        uniform sampler2D uBaseColorTexture;
+        uniform int uUseTexture;
+        uniform int uUseLighting;
         out vec4 fragColor;
         void main()
         {
-            fragColor = vec4(vColor, 1.0);
+            vec4 baseColor = vec4(uTint, 1.0) * uBaseColorFactor;
+            if (uUseTexture != 0)
+                baseColor *= texture(uBaseColorTexture, vTexCoord);
+
+            float lighting = 1.0;
+            if (uUseLighting != 0)
+            {
+                vec3 normal = normalize(vNormal);
+                vec3 lightDirection = normalize(vec3(-0.35, -0.45, 0.82));
+                lighting = 0.28 + 0.72 * max(dot(normal, lightDirection), 0.0);
+            }
+
+            fragColor = vec4(baseColor.rgb * lighting, baseColor.a);
         }
         """;
 
@@ -120,10 +142,16 @@ internal static class NetworkedProgram
             SDL.SDL_GL_SetSwapInterval(1);
 
             program = CreateProgram(VertexShaderSource, FragmentShaderSource);
-            var mvpLocation = GL.GetUniformLocation((int) program, "uMvp");
-            var tintLocation = GL.GetUniformLocation((int) program, "uTint");
-            if (mvpLocation < 0 || tintLocation < 0)
-                throw new InvalidOperationException("Networked 3D shader uniforms are missing.");
+            var shader = new ShaderLocations3D(
+                GL.GetUniformLocation((int) program, "uModel"),
+                GL.GetUniformLocation((int) program, "uMvp"),
+                GL.GetUniformLocation((int) program, "uTint"),
+                GL.GetUniformLocation((int) program, "uBaseColorFactor"),
+                GL.GetUniformLocation((int) program, "uBaseColorTexture"),
+                GL.GetUniformLocation((int) program, "uUseTexture"),
+                GL.GetUniformLocation((int) program, "uUseLighting"));
+            if (!shader.IsValid)
+                throw new InvalidOperationException("Networked 3D material shader uniforms are missing.");
 
             var vertices = CreateCubeVertices();
             GL.GenVertexArrays(1, out vertexArray);
@@ -145,6 +173,8 @@ internal static class NetworkedProgram
             GL.DepthFunc(DepthFunction.Less);
             GL.ClearColor(0.025f, 0.035f, 0.065f, 1f);
 
+            GL.UseProgram(program);
+            GL.Uniform1(shader.BaseColorTexture, 0);
             worldRenderer = new WorldSceneRenderer3D(worldDefinition);
 
             var interactive = frameLimit is null && !autoPlay;
@@ -311,8 +341,7 @@ internal static class NetworkedProgram
                     worldDefinition,
                     worldRenderer,
                     vertexArray,
-                    mvpLocation,
-                    tintLocation,
+                    shader,
                     view,
                     projection);
                 GL.BindVertexArray(vertexArray);
@@ -321,8 +350,7 @@ internal static class NetworkedProgram
                     predictor.FacingYaw,
                     new Vector3(1f, 0.25f, 0.08f),
                     new Vector3(1f, 0.58f, 0.22f),
-                    mvpLocation,
-                    tintLocation,
+                    shader,
                     view,
                     projection);
 
@@ -337,8 +365,7 @@ internal static class NetworkedProgram
                         remote.FacingYaw,
                         new Vector3(0.08f, 0.65f, 1f),
                         new Vector3(0.35f, 0.9f, 1f),
-                        mvpLocation,
-                        tintLocation,
+                        shader,
                         view,
                         projection);
                 }
@@ -404,8 +431,7 @@ internal static class NetworkedProgram
         WorldDefinition3D world,
         WorldSceneRenderer3D renderer,
         uint cubeVertexArray,
-        int mvpLocation,
-        int tintLocation,
+        ShaderLocations3D shader,
         Matrix4x4 view,
         Matrix4x4 projection)
     {
@@ -414,10 +440,22 @@ internal static class NetworkedProgram
             var tint = WorldTint(worldObject);
             if (worldObject.ModelPath is not null)
             {
-                var mvp = worldObject.Transform.Matrix * view * projection;
-                GL.UniformMatrix4(mvpLocation, 1, false, (float*) &mvp);
-                GL.Uniform3(tintLocation, tint.X, tint.Y, tint.Z);
-                renderer.GetMesh(worldObject.ModelPath).Draw();
+                var model = worldObject.Transform.Matrix;
+                var mvp = model * view * projection;
+                var mesh = renderer.GetMesh(worldObject.ModelPath);
+                GL.UniformMatrix4(shader.Model, 1, false, (float*) &model);
+                GL.UniformMatrix4(shader.Mvp, 1, false, (float*) &mvp);
+                GL.Uniform3(shader.Tint, tint.X, tint.Y, tint.Z);
+                GL.Uniform4(
+                    shader.BaseColorFactor,
+                    mesh.BaseColorFactor.X,
+                    mesh.BaseColorFactor.Y,
+                    mesh.BaseColorFactor.Z,
+                    mesh.BaseColorFactor.W);
+                GL.Uniform1(shader.UseTexture, mesh.HasBaseColorTexture ? 1 : 0);
+                GL.Uniform1(shader.UseLighting, 1);
+                mesh.BindBaseColorTexture();
+                mesh.Draw();
                 continue;
             }
 
@@ -425,8 +463,7 @@ internal static class NetworkedProgram
             DrawCube(
                 worldObject.Transform,
                 tint,
-                mvpLocation,
-                tintLocation,
+                shader,
                 view,
                 projection);
         }
@@ -435,7 +472,7 @@ internal static class NetworkedProgram
     private static Vector3 WorldTint(WorldObjectDefinition3D worldObject)
     {
         if (worldObject.ModelPath is not null)
-            return new Vector3(0.95f, 0.62f, 0.16f);
+            return Vector3.One;
         if (worldObject.Id.Equals("floor", StringComparison.OrdinalIgnoreCase))
             return new Vector3(0.18f, 0.24f, 0.3f);
         if (worldObject.Id.StartsWith("wall-", StringComparison.OrdinalIgnoreCase))
@@ -448,8 +485,7 @@ internal static class NetworkedProgram
         float yaw,
         Vector3 bodyTint,
         Vector3 headTint,
-        int mvpLocation,
-        int tintLocation,
+        ShaderLocations3D shader,
         Matrix4x4 view,
         Matrix4x4 projection)
     {
@@ -457,15 +493,13 @@ internal static class NetworkedProgram
         DrawCube(
             new SpatialTransform(position - Vector3.UnitZ * 0.2f, rotation, new Vector3(0.62f, 0.42f, 1.2f)),
             bodyTint,
-            mvpLocation,
-            tintLocation,
+            shader,
             view,
             projection);
         DrawCube(
             new SpatialTransform(position + Vector3.UnitZ * 0.56f, rotation, new Vector3(0.55f)),
             headTint,
-            mvpLocation,
-            tintLocation,
+            shader,
             view,
             projection);
     }
@@ -473,14 +507,18 @@ internal static class NetworkedProgram
     private static unsafe void DrawCube(
         SpatialTransform transform,
         Vector3 tint,
-        int mvpLocation,
-        int tintLocation,
+        ShaderLocations3D shader,
         Matrix4x4 view,
         Matrix4x4 projection)
     {
-        var mvp = transform.Matrix * view * projection;
-        GL.UniformMatrix4(mvpLocation, 1, false, (float*) &mvp);
-        GL.Uniform3(tintLocation, tint.X, tint.Y, tint.Z);
+        var model = transform.Matrix;
+        var mvp = model * view * projection;
+        GL.UniformMatrix4(shader.Model, 1, false, (float*) &model);
+        GL.UniformMatrix4(shader.Mvp, 1, false, (float*) &mvp);
+        GL.Uniform3(shader.Tint, tint.X, tint.Y, tint.Z);
+        GL.Uniform4(shader.BaseColorFactor, 1f, 1f, 1f, 1f);
+        GL.Uniform1(shader.UseTexture, 0);
+        GL.Uniform1(shader.UseLighting, 0);
         GL.DrawArrays(PrimitiveType.Triangles, 0, 36);
     }
 
@@ -628,5 +666,24 @@ internal static class NetworkedProgram
         }
 
         return null;
+    }
+
+    private readonly record struct ShaderLocations3D(
+        int Model,
+        int Mvp,
+        int Tint,
+        int BaseColorFactor,
+        int BaseColorTexture,
+        int UseTexture,
+        int UseLighting)
+    {
+        public bool IsValid =>
+            Model >= 0 &&
+            Mvp >= 0 &&
+            Tint >= 0 &&
+            BaseColorFactor >= 0 &&
+            BaseColorTexture >= 0 &&
+            UseTexture >= 0 &&
+            UseLighting >= 0;
     }
 }
