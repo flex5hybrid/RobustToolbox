@@ -1,0 +1,76 @@
+{
+  "asset": {
+    "version": "2.0",
+    "generator": "RussianCM Robust.Client3D bootstrap"
+  },
+  "buffers": [
+    {
+      "uri": "data:application/octet-stream;base64,AAAAAAAAAACamZk/ZmZmvzMzM78AAAAAZmZmPzMzM78AAAAAAAAAAAAAAACamZk/ZmZmPzMzM78AAAAAAAAAAGZmZj8AAAAAAAAAAAAAAACamZk/AAAAAGZmZj8AAAAAZmZmvzMzM78AAAAAZmZmvzMzM78AAAAAAAAAAGZmZj8AAAAAZmZmPzMzM78AAAAAAAAAAJ0gXb+x/QA/AAAAAJ0gXb+x/QA/AAAAAJ0gXb+x/QA/XGpRP6eX6z6+sbA+XGpRP6eX6z6+sbA+XGpRP6eX6z6+sbA+XGpRv6eX6z6+sbA+XGpRv6eX6z6+sbA+XGpRv6eX6z6+sbA+AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AAAAPwAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAPwAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAPwAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAPwAAgD8AAAAAAAAAAAAAgD8AAAAAAAABAAIAAwAEAAUABgAHAAgACQAKAAsA",
+      "byteLength": 408
+    }
+  ],
+  "bufferViews": [
+    {
+      "buffer": 0,
+      "byteOffset": 0,
+      "byteLength": 144
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 144,
+      "byteLength": 144
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 288,
+      "byteLength": 96
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 384,
+      "byteLength": 24
+    }
+  ],
+  "accessors": [
+    {
+      "bufferView": 0,
+      "componentType": 5126,
+      "count": 12,
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 1,
+      "componentType": 5126,
+      "count": 12,
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 2,
+      "componentType": 5126,
+      "count": 12,
+      "type": "VEC2"
+    },
+    {
+      "bufferView": 3,
+      "componentType": 5123,
+      "count": 12,
+      "type": "SCALAR"
+    }
+  ],
+  "meshes": [
+    {
+      "name": "BootstrapPyramid",
+      "primitives": [
+        {
+          "attributes": {
+            "POSITION": 0,
+            "NORMAL": 1,
+            "TEXCOORD_0": 2
+          },
+          "indices": 3,
+          "mode": 4
+        }
+      ]
+    }
+  ]
+}
