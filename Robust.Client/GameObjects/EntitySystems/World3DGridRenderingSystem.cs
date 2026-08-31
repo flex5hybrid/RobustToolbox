@@ -82,7 +82,7 @@ internal sealed class World3DGridOverlay : Overlay
     private bool _initialized;
 
     public override OverlaySpace Space => OverlaySpace.WorldSpace;
-    public override bool OverwriteTargetFrameBuffer => true;
+    public override bool OverwriteTargetFrameBuffer => false;
 
     public World3DGridOverlay(SharedTransformSystem transformSystem, SharedMapSystem mapSystem)
     {
@@ -102,14 +102,13 @@ internal sealed class World3DGridOverlay : Overlay
         if (eye is null)
             return;
 
-        // This overlay uses raw OpenGL while Clyde keeps its own GL state cache.
-        // Preserve the actual bindings Clyde had on entry so our pass is transparent
-        // to everything that renders after the world overlay.
         GL.GetInteger(GetPName.CurrentProgram, out var previousProgram);
         GL.GetInteger(GetPName.VertexArrayBinding, out var previousVertexArray);
         GL.GetInteger(GetPName.ArrayBufferBinding, out var previousArrayBuffer);
         GL.GetInteger(GetPName.DepthFunc, out var previousDepthFunc);
         var previousDepthTest = GL.IsEnabled(EnableCap.DepthTest);
+        var previousCullFace = GL.IsEnabled(EnableCap.CullFace);
+        var previousScissorTest = GL.IsEnabled(EnableCap.ScissorTest);
 
         try
         {
@@ -122,15 +121,18 @@ internal sealed class World3DGridOverlay : Overlay
             foreach (var grid in _grids)
                 AppendGrid(grid, args.WorldBounds);
 
+            // Do not erase the normal SS14 world unless we actually have 3D geometry to replace it with.
+            if (_vertices.Count == 0)
+                return;
+
             GL.Viewport(0, 0, args.Viewport.Size.X, args.Viewport.Size.Y);
+            GL.Disable(EnableCap.CullFace);
+            GL.Disable(EnableCap.ScissorTest);
             GL.ClearColor(0.025f, 0.035f, 0.055f, 1f);
             GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
             GL.Enable(EnableCap.DepthTest);
             GL.DepthFunc(DepthFunction.Less);
             GL.DepthMask(true);
-
-            if (_vertices.Count == 0)
-                return;
 
             var target2 = eye.Position.Position + eye.Offset;
             var target = new Vector3(target2.X, target2.Y, 0f);
@@ -172,6 +174,16 @@ internal sealed class World3DGridOverlay : Overlay
                 GL.Enable(EnableCap.DepthTest);
             else
                 GL.Disable(EnableCap.DepthTest);
+
+            if (previousCullFace)
+                GL.Enable(EnableCap.CullFace);
+            else
+                GL.Disable(EnableCap.CullFace);
+
+            if (previousScissorTest)
+                GL.Enable(EnableCap.ScissorTest);
+            else
+                GL.Disable(EnableCap.ScissorTest);
         }
     }
 
