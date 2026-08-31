@@ -47,9 +47,14 @@ public sealed record WorldObjectDefinition3D(
 
 public static class WorldDefinition3DLoader
 {
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+    };
+
     public static WorldDefinition3D Load(ReadOnlySpan<byte> jsonUtf8)
     {
-        var dto = JsonSerializer.Deserialize<WorldFileDto>(jsonUtf8)
+        var dto = JsonSerializer.Deserialize<WorldFileDto>(jsonUtf8, JsonOptions)
                   ?? throw new InvalidOperationException("3D world definition is empty.");
 
         if (dto.Version != WorldDefinition3D.CurrentVersion)
