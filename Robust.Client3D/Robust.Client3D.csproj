@@ -11,6 +11,7 @@
 
   <ItemGroup>
     <PackageReference Include="OpenToolkit.Graphics" />
+    <PackageReference Include="SixLabors.ImageSharp" />
     <PackageReference Include="SpaceWizards.Sdl" />
     <PackageReference Include="Robust.Natives" />
   </ItemGroup>
@@ -30,6 +31,18 @@
       <Link>Assets\Models\%(RecursiveDir)%(Filename)%(Extension)</Link>
     </Content>
     <Content Include="Assets\Models\**\*.bin">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>Assets\Models\%(RecursiveDir)%(Filename)%(Extension)</Link>
+    </Content>
+    <Content Include="Assets\Models\**\*.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>Assets\Models\%(RecursiveDir)%(Filename)%(Extension)</Link>
+    </Content>
+    <Content Include="Assets\Models\**\*.jpg">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>Assets\Models\%(RecursiveDir)%(Filename)%(Extension)</Link>
+    </Content>
+    <Content Include="Assets\Models\**\*.jpeg">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>Assets\Models\%(RecursiveDir)%(Filename)%(Extension)</Link>
     </Content>
