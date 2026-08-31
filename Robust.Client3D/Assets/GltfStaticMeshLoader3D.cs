@@ -18,7 +18,7 @@ public static class GltfStaticMeshLoader3D
         ReadOnlySpan<byte> jsonUtf8,
         Func<string, byte[]>? externalBufferResolver = null)
     {
-        using var document = JsonDocument.Parse(jsonUtf8);
+        using var document = JsonDocument.Parse(jsonUtf8.ToArray());
         var root = document.RootElement;
 
         var buffers = LoadBuffers(root, externalBufferResolver);
