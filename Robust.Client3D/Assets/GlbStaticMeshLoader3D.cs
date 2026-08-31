@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Text;
 using System.Text.Json.Nodes;
 
 namespace Robust.Client3D.Assets;
@@ -26,7 +27,7 @@ public static class GlbStaticMeshLoader3D
             throw new NotSupportedException("Only GLB version 2 is supported.");
 
         var declaredLength = BinaryPrimitives.ReadUInt32LittleEndian(glb[8..]);
-        if (declaredLength != glb.Length)
+        if (declaredLength != (uint) glb.Length)
             throw new InvalidOperationException(
                 $"GLB declared length {declaredLength} does not match actual length {glb.Length}.");
 
@@ -44,7 +45,7 @@ public static class GlbStaticMeshLoader3D
             var chunkType = BinaryPrimitives.ReadUInt32LittleEndian(glb[(offset + 4)..]);
             offset += ChunkHeaderSize;
 
-            if (chunkLength < 0 || offset + chunkLength > glb.Length)
+            if (offset > glb.Length - chunkLength)
                 throw new InvalidOperationException("GLB chunk points outside the container.");
             if ((chunkLength & 3) != 0)
                 throw new InvalidOperationException("GLB chunks must be padded to a four-byte boundary.");
@@ -78,7 +79,7 @@ public static class GlbStaticMeshLoader3D
         if (binary is null)
             return GltfStaticMeshLoader3D.Load(json, externalBufferResolver);
 
-        var root = JsonNode.Parse(json)
+        var root = JsonNode.Parse(Encoding.UTF8.GetString(json))
                    ?? throw new InvalidOperationException("GLB JSON chunk is empty.");
         var buffers = root["buffers"]?.AsArray()
                       ?? throw new InvalidOperationException("GLB JSON does not define buffers.");
