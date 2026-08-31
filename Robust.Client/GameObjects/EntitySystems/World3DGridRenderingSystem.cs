@@ -131,7 +131,7 @@ internal sealed class World3DGridOverlay : Overlay
             if (++_diagnosticFrames >= 300)
             {
                 _diagnosticFrames = 0;
-                Console.WriteLine(
+                System.Console.WriteLine(
                     $"[SS14-3D] map={args.MapId}; eye={eyeWorld.X:F1},{eyeWorld.Y:F1}; grids={gridCount}; vertices={_vertices.Count / FloatsPerVertex}");
             }
 
