@@ -45,9 +45,7 @@ public sealed class PredictedPlayer3D
             authoritative.Grounded);
         FacingYaw = authoritative.FacingYaw;
 
-        _pendingInputs.RemoveAll(static (pending, acknowledged) =>
-                pending.Input.Sequence <= acknowledged,
-            authoritative.AcknowledgedInput);
+        _pendingInputs.RemoveAll(pending => pending.Input.Sequence <= authoritative.AcknowledgedInput);
 
         foreach (var pending in _pendingInputs)
         {
