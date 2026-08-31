@@ -4,7 +4,7 @@ namespace Robust.Shared3D;
 
 public static class NetworkProtocol3D
 {
-    public const int Version = 1;
+    public const int Version = 2;
     public const int DefaultPort = 12133;
 
     public static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
@@ -37,6 +37,8 @@ public sealed record HelloMessage3D
     public int ProtocolVersion { get; init; } = NetworkProtocol3D.Version;
     public int PlayerId { get; init; }
     public float FixedDelta { get; init; }
+    public required string WorldResource { get; init; }
+    public required string WorldSha256 { get; init; }
 }
 
 public sealed record InputMessage3D
