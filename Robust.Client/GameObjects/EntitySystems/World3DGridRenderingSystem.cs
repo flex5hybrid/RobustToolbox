@@ -53,11 +53,14 @@ internal sealed class World3DGridOverlay : Overlay
         layout(location = 0) in vec3 aPosition;
         layout(location = 1) in vec3 aColor;
         uniform mat4 uMvp;
+        uniform int uClipSpace;
         out vec3 vColor;
         void main()
         {
             vColor = aColor;
-            gl_Position = uMvp * vec4(aPosition, 1.0);
+            gl_Position = uClipSpace != 0
+                ? vec4(aPosition, 1.0)
+                : uMvp * vec4(aPosition, 1.0);
         }
         """;
 
@@ -79,8 +82,13 @@ internal sealed class World3DGridOverlay : Overlay
     private uint _vertexBuffer;
     private uint _program;
     private int _mvpLocation = -1;
-    private int _diagnosticFrames;
+    private int _clipSpaceLocation = -1;
+    private bool _reportedGeometry;
+    private bool _reportedRenderTarget;
+    private bool _reportedMatrix;
     private bool _initialized;
+
+    private readonly DiagnosticStage _diagnosticStage;
 
     public override OverlaySpace Space => OverlaySpace.WorldSpace;
     public override bool OverwriteTargetFrameBuffer => false;
@@ -89,7 +97,10 @@ internal sealed class World3DGridOverlay : Overlay
     {
         _transformSystem = transformSystem;
         _mapSystem = mapSystem;
+        _diagnosticStage = ParseDiagnosticStage(Environment.GetEnvironmentVariable("SS14_3D_DIAGNOSTIC"));
         ZIndex = int.MaxValue;
+
+        System.Console.WriteLine($"[SS14-3D] render stage: {_diagnosticStage}");
     }
 
     protected internal override bool BeforeDraw(in OverlayDrawArgs args)
@@ -116,15 +127,14 @@ internal sealed class World3DGridOverlay : Overlay
             AppendGrid(grid, eyeWorld);
         }
 
-        if (++_diagnosticFrames >= 300)
+        if (!_reportedGeometry)
         {
-            _diagnosticFrames = 0;
             System.Console.WriteLine(
                 $"[SS14-3D] map={args.MapId}; eye={eyeWorld.X:F1},{eyeWorld.Y:F1}; grids={gridCount}; vertices={_vertices.Count / FloatsPerVertex}");
+            _reportedGeometry = true;
         }
 
-        // Do not erase the normal SS14 world unless we actually have 3D geometry to replace it with.
-        if (_vertices.Count == 0)
+        if (_diagnosticStage == DiagnosticStage.Tiles && _vertices.Count == 0)
             return;
 
         var target = new Vector3(eyeWorld.X, eyeWorld.Y, 0f);
@@ -138,45 +148,94 @@ internal sealed class World3DGridOverlay : Overlay
             200f);
         var mvp = view * projection;
 
+        if (!_reportedMatrix && _diagnosticStage == DiagnosticStage.WorldQuad)
+        {
+            var clip = Vector4.Transform(new Vector4(target, 1f), mvp);
+            var ndc = clip / clip.W;
+            System.Console.WriteLine(
+                $"[SS14-3D] target clip={clip.X:F3},{clip.Y:F3},{clip.Z:F3},{clip.W:F3}; ndc={ndc.X:F3},{ndc.Y:F3},{ndc.Z:F3}");
+            _reportedMatrix = true;
+        }
+
         // Copy everything needed out of OverlayDrawArgs before entering the callback. OverlayDrawArgs is
         // a ref struct and cannot be captured by a lambda. Going through RenderInRenderTarget is important:
         // Clyde flushes its queued 2D work and binds the viewport's actual framebuffer before our raw GL pass.
         var renderTarget = args.Viewport.RenderTarget;
         var renderHandle = args.RenderHandle;
         var viewportSize = args.Viewport.Size;
-        var vertexData = _vertices.ToArray();
+        var vertexData = GetStageVertices(eyeWorld);
 
         renderHandle.RenderInRenderTarget(
             renderTarget,
-            () => DrawPerspectivePass(viewportSize, vertexData, mvp),
+            () => DrawPerspectivePass(viewportSize, vertexData, mvp, _diagnosticStage),
             null);
     }
 
-    private unsafe void DrawPerspectivePass(Vector2i viewportSize, float[] vertexData, Matrix4x4 mvp)
+    private unsafe void DrawPerspectivePass(
+        Vector2i viewportSize,
+        float[] vertexData,
+        Matrix4x4 mvp,
+        DiagnosticStage stage)
     {
         GL.GetInteger(GetPName.CurrentProgram, out var previousProgram);
         GL.GetInteger(GetPName.VertexArrayBinding, out var previousVertexArray);
         GL.GetInteger(GetPName.ArrayBufferBinding, out var previousArrayBuffer);
         GL.GetInteger(GetPName.DepthFunc, out var previousDepthFunc);
+        var previousDepthMask = GL.GetBoolean(GetPName.DepthWritemask);
         var previousDepthTest = GL.IsEnabled(EnableCap.DepthTest);
         var previousCullFace = GL.IsEnabled(EnableCap.CullFace);
         var previousScissorTest = GL.IsEnabled(EnableCap.ScissorTest);
+        var previousStencilTest = GL.IsEnabled(EnableCap.StencilTest);
+        var previousBlend = GL.IsEnabled(EnableCap.Blend);
 
         try
         {
             EnsureInitialized();
 
+            if (!_reportedRenderTarget)
+            {
+                GL.GetInteger(GetPName.DrawFramebufferBinding, out var framebuffer);
+                var framebufferStatus = GL.CheckFramebufferStatus(FramebufferTarget.DrawFramebuffer);
+                System.Console.WriteLine(
+                    $"[SS14-3D] framebuffer={framebuffer}; status={framebufferStatus}; viewport={viewportSize.X}x{viewportSize.Y}");
+                _reportedRenderTarget = true;
+            }
+
             GL.Viewport(0, 0, viewportSize.X, viewportSize.Y);
             GL.Disable(EnableCap.CullFace);
             GL.Disable(EnableCap.ScissorTest);
-            GL.ClearColor(0.025f, 0.035f, 0.055f, 1f);
-            GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
-            GL.Enable(EnableCap.DepthTest);
-            GL.DepthFunc(DepthFunction.Less);
+            GL.Disable(EnableCap.StencilTest);
+            GL.Disable(EnableCap.Blend);
+
+            if (stage == DiagnosticStage.Clear)
+                GL.ClearColor(1f, 0f, 0.75f, 1f);
+            else
+                GL.ClearColor(0.025f, 0.035f, 0.055f, 1f);
+
+            // Clyde's preceding lighting passes can leave depth writes disabled. A masked depth clear
+            // is a no-op, so restore writes before clearing for conventional Less depth testing.
+            GL.ClearDepth(1d);
             GL.DepthMask(true);
+            GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
+
+            if (stage is DiagnosticStage.WorldQuad or DiagnosticStage.Tiles)
+            {
+                GL.Enable(EnableCap.DepthTest);
+                GL.DepthFunc(DepthFunction.Less);
+                GL.DepthMask(true);
+            }
+            else
+            {
+                GL.Disable(EnableCap.DepthTest);
+                GL.DepthMask(false);
+            }
+
+            if (stage == DiagnosticStage.Clear)
+                return;
 
             GL.UseProgram(_program);
             GL.UniformMatrix4(_mvpLocation, 1, false, (float*) &mvp);
+            GL.Uniform1(_clipSpaceLocation, stage == DiagnosticStage.ClipTriangle ? 1 : 0);
             GL.BindVertexArray(_vertexArray);
             GL.BindBuffer(BufferTarget.ArrayBuffer, _vertexBuffer);
 
@@ -197,6 +256,7 @@ internal sealed class World3DGridOverlay : Overlay
             GL.BindVertexArray((uint) previousVertexArray);
             GL.UseProgram((uint) previousProgram);
             GL.DepthFunc((DepthFunction) previousDepthFunc);
+            GL.DepthMask(previousDepthMask);
 
             if (previousDepthTest)
                 GL.Enable(EnableCap.DepthTest);
@@ -212,7 +272,57 @@ internal sealed class World3DGridOverlay : Overlay
                 GL.Enable(EnableCap.ScissorTest);
             else
                 GL.Disable(EnableCap.ScissorTest);
+
+            if (previousStencilTest)
+                GL.Enable(EnableCap.StencilTest);
+            else
+                GL.Disable(EnableCap.StencilTest);
+
+            if (previousBlend)
+                GL.Enable(EnableCap.Blend);
+            else
+                GL.Disable(EnableCap.Blend);
         }
+    }
+
+    private float[] GetStageVertices(Vector2 eyeWorld)
+    {
+        switch (_diagnosticStage)
+        {
+            case DiagnosticStage.Clear:
+                return Array.Empty<float>();
+            case DiagnosticStage.ClipTriangle:
+                return
+                [
+                    -0.85f, -0.75f, 0f, 1f, 0.1f, 0.1f,
+                    0.85f, -0.75f, 0f, 0.1f, 1f, 0.1f,
+                    0f, 0.85f, 0f, 0.1f, 0.3f, 1f,
+                ];
+            case DiagnosticStage.WorldQuad:
+                _vertices.Clear();
+                var center = new Vector2(eyeWorld.X, eyeWorld.Y);
+                AddQuad(
+                    center + new Vector2(-3f, -3f),
+                    center + new Vector2(3f, -3f),
+                    center + new Vector2(3f, 3f),
+                    center + new Vector2(-3f, 3f),
+                    0f,
+                    new Vector3(1f, 0.12f, 0.72f));
+                return _vertices.ToArray();
+            default:
+                return _vertices.ToArray();
+        }
+    }
+
+    private static DiagnosticStage ParseDiagnosticStage(string? value)
+    {
+        return value?.Trim().ToLowerInvariant() switch
+        {
+            "clear" => DiagnosticStage.Clear,
+            "clip" => DiagnosticStage.ClipTriangle,
+            "quad" => DiagnosticStage.WorldQuad,
+            _ => DiagnosticStage.Tiles,
+        };
     }
 
     protected override void DisposeBehavior()
@@ -356,8 +466,11 @@ internal sealed class World3DGridOverlay : Overlay
 
         _program = CreateProgram(VertexShaderSource, FragmentShaderSource);
         _mvpLocation = GL.GetUniformLocation((int) _program, "uMvp");
+        _clipSpaceLocation = GL.GetUniformLocation((int) _program, "uClipSpace");
         if (_mvpLocation < 0)
             throw new InvalidOperationException("SS14 3D grid shader is missing uMvp.");
+        if (_clipSpaceLocation < 0)
+            throw new InvalidOperationException("SS14 3D grid shader is missing uClipSpace.");
 
         GL.GenVertexArrays(1, out _vertexArray);
         GL.GenBuffers(1, out _vertexBuffer);
@@ -416,5 +529,13 @@ internal sealed class World3DGridOverlay : Overlay
         var log = GL.GetShaderInfoLog((int) shader);
         GL.DeleteShader(shader);
         throw new InvalidOperationException($"SS14 3D grid shader compilation failed: {log}");
+    }
+
+    private enum DiagnosticStage
+    {
+        Clear,
+        ClipTriangle,
+        WorldQuad,
+        Tiles,
     }
 }
