@@ -550,7 +550,7 @@ public abstract partial class SharedTransformSystem
 
             if (TerminatingOrDeleted(value.EntityId))
             {
-                Log.Error($"{ToPrettyString(uid)} is attempting to attach itself to a terminating entity {ToPrettyString(value.EntityId)}. Trace: {Environment.StackTrace}");
+                Log.Error($"{ToPrettyString(uid)} is attempting to attach itself to a terminating entity {value.EntityId}. Trace: {Environment.StackTrace}");
                 return;
             }
         }
@@ -994,6 +994,7 @@ public abstract partial class SharedTransformSystem
                 var fullState = new TransformComponentState(
                     xform.LocalPosition,
                     xform.LocalRotation,
+                    xform.LocalScale,
                     parent,
                     xform.NoLocalRotation,
                     xform.Anchored);
@@ -1009,10 +1010,41 @@ public abstract partial class SharedTransformSystem
     {
         switch (state)
         {
-            xform.NextPosition = nextTransform.LocalPosition;
-            xform.NextRotation = nextTransform.Rotation;
-            xform.NextScale = nextTransform.LocalScale;
-            ActivateLerp(uid, xform);
+            case TransformComponentState nextTransform:
+            {
+                if (nextTransform.ParentID != GetNetEntity(xform.ParentUid))
+                    return;
+
+                xform.NextPosition = nextTransform.LocalPosition;
+                xform.NextRotation = nextTransform.Rotation;
+                xform.NextScale = nextTransform.LocalScale;
+                ActivateLerp(uid, xform);
+                break;
+            }
+            case TransformComponentDeltaState delta:
+            {
+                if (delta.IsChanged(TransformParentIndex) && delta.ParentID != GetNetEntity(xform.ParentUid))
+                    return;
+
+                var activateLerp = false;
+
+                if (delta.IsChanged(TransformLocalPositionIndex))
+                {
+                    xform.NextPosition = delta.LocalPosition;
+                    activateLerp = true;
+                }
+
+                if (delta.IsChanged(TransformLocalRotationIndex))
+                {
+                    xform.NextRotation = delta.Rotation;
+                    activateLerp = true;
+                }
+
+                if (activateLerp)
+                    ActivateLerp(uid, xform);
+
+                break;
+            }
         }
     }
 
@@ -1513,7 +1545,7 @@ public abstract partial class SharedTransformSystem
     public (Vector3 WorldPosition, Quaternion WorldRotation, Matrix4x4 WorldMatrix, Matrix4x4 InvWorldMatrix)
         GetWorldPositionRotationMatrixWithInv(EntityUid uid)
     {
-        return GetWorldPositionRotationMatrixWithInv(XformQuery.GetComponent(uid), XformQuery);
+        return GetWorldPositionRotationMatrixWithInv(uid, XformQuery);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1549,8 +1581,7 @@ public abstract partial class SharedTransformSystem
     {
         // TODO make this log an error?
         // SetCoordinates already does this when trying to move entities mid-deletion.
-        if (TerminatingOrDeleted(uid))
-            return;
+        if (TerminatingOrDeleted(uid))n            return;
 
         if (!XformQuery.Resolve(uid, ref xform, false))
             return;
