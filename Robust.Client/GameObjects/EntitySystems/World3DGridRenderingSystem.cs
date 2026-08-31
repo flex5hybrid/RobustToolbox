@@ -97,12 +97,63 @@ internal sealed class World3DGridOverlay : Overlay
         return args.MapId != MapId.Nullspace && args.Viewport.Eye is not null;
     }
 
-    protected internal override unsafe void Draw(in OverlayDrawArgs args)
+    protected internal override void Draw(in OverlayDrawArgs args)
     {
         var eye = args.Viewport.Eye;
         if (eye is null)
             return;
 
+        _vertices.Clear();
+
+        // Do not use the legacy 2D viewport bounds to decide what exists in our perspective view.
+        // Enumerate the actual live grids on the eye's map, then select chunks in grid-local space
+        // around the real IEye position.
+        var eyeWorld = eye.Position.Position + eye.Offset;
+        var gridCount = 0;
+        foreach (var grid in _mapSystem.GetAllGrids(args.MapId))
+        {
+            gridCount++;
+            AppendGrid(grid, eyeWorld);
+        }
+
+        if (++_diagnosticFrames >= 300)
+        {
+            _diagnosticFrames = 0;
+            System.Console.WriteLine(
+                $"[SS14-3D] map={args.MapId}; eye={eyeWorld.X:F1},{eyeWorld.Y:F1}; grids={gridCount}; vertices={_vertices.Count / FloatsPerVertex}");
+        }
+
+        // Do not erase the normal SS14 world unless we actually have 3D geometry to replace it with.
+        if (_vertices.Count == 0)
+            return;
+
+        var target = new Vector3(eyeWorld.X, eyeWorld.Y, 0f);
+        var forward2 = eye.Rotation.ToWorldVec();
+        var camera = target + new Vector3(-forward2.X * 9f, -forward2.Y * 9f, 7f);
+        var view = Matrix4x4.CreateLookAt(camera, target, Vector3.UnitZ);
+        var projection = Matrix4x4.CreatePerspectiveFieldOfView(
+            MathF.PI / 3f,
+            Math.Max(1, args.Viewport.Size.X) / (float) Math.Max(1, args.Viewport.Size.Y),
+            0.05f,
+            200f);
+        var mvp = view * projection;
+
+        // Copy everything needed out of OverlayDrawArgs before entering the callback. OverlayDrawArgs is
+        // a ref struct and cannot be captured by a lambda. Going through RenderInRenderTarget is important:
+        // Clyde flushes its queued 2D work and binds the viewport's actual framebuffer before our raw GL pass.
+        var renderTarget = args.Viewport.RenderTarget;
+        var renderHandle = args.RenderHandle;
+        var viewportSize = args.Viewport.Size;
+        var vertexData = _vertices.ToArray();
+
+        renderHandle.RenderInRenderTarget(
+            renderTarget,
+            () => DrawPerspectivePass(viewportSize, vertexData, mvp),
+            null);
+    }
+
+    private unsafe void DrawPerspectivePass(Vector2i viewportSize, float[] vertexData, Matrix4x4 mvp)
+    {
         GL.GetInteger(GetPName.CurrentProgram, out var previousProgram);
         GL.GetInteger(GetPName.VertexArrayBinding, out var previousVertexArray);
         GL.GetInteger(GetPName.ArrayBufferBinding, out var previousArrayBuffer);
@@ -115,31 +166,7 @@ internal sealed class World3DGridOverlay : Overlay
         {
             EnsureInitialized();
 
-            _vertices.Clear();
-
-            // Do not use the legacy 2D viewport bounds to decide what exists in our perspective view.
-            // Enumerate the actual live grids on the eye's map, then select chunks in grid-local space
-            // around the real IEye position.
-            var eyeWorld = eye.Position.Position + eye.Offset;
-            var gridCount = 0;
-            foreach (var grid in _mapSystem.GetAllGrids(args.MapId))
-            {
-                gridCount++;
-                AppendGrid(grid, eyeWorld);
-            }
-
-            if (++_diagnosticFrames >= 300)
-            {
-                _diagnosticFrames = 0;
-                System.Console.WriteLine(
-                    $"[SS14-3D] map={args.MapId}; eye={eyeWorld.X:F1},{eyeWorld.Y:F1}; grids={gridCount}; vertices={_vertices.Count / FloatsPerVertex}");
-            }
-
-            // Do not erase the normal SS14 world unless we actually have 3D geometry to replace it with.
-            if (_vertices.Count == 0)
-                return;
-
-            GL.Viewport(0, 0, args.Viewport.Size.X, args.Viewport.Size.Y);
+            GL.Viewport(0, 0, viewportSize.X, viewportSize.Y);
             GL.Disable(EnableCap.CullFace);
             GL.Disable(EnableCap.ScissorTest);
             GL.ClearColor(0.025f, 0.035f, 0.055f, 1f);
@@ -148,23 +175,11 @@ internal sealed class World3DGridOverlay : Overlay
             GL.DepthFunc(DepthFunction.Less);
             GL.DepthMask(true);
 
-            var target = new Vector3(eyeWorld.X, eyeWorld.Y, 0f);
-            var forward2 = eye.Rotation.ToWorldVec();
-            var camera = target + new Vector3(-forward2.X * 9f, -forward2.Y * 9f, 7f);
-            var view = Matrix4x4.CreateLookAt(camera, target, Vector3.UnitZ);
-            var projection = Matrix4x4.CreatePerspectiveFieldOfView(
-                MathF.PI / 3f,
-                Math.Max(1, args.Viewport.Size.X) / (float) Math.Max(1, args.Viewport.Size.Y),
-                0.05f,
-                200f);
-            var mvp = view * projection;
-
             GL.UseProgram(_program);
             GL.UniformMatrix4(_mvpLocation, 1, false, (float*) &mvp);
             GL.BindVertexArray(_vertexArray);
             GL.BindBuffer(BufferTarget.ArrayBuffer, _vertexBuffer);
 
-            var vertexData = _vertices.ToArray();
             fixed (float* vertexPointer = vertexData)
             {
                 GL.BufferData(
