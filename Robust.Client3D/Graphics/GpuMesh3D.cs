@@ -120,11 +120,11 @@ public sealed class GpuMesh3D : IDisposable
         GL.TexParameter(
             TextureTarget.Texture2D,
             TextureParameterName.TextureMinFilter,
-            (int) TextureMinFilter.LinearMipmapLinear);
+            (int) TextureMinFilter.Nearest);
         GL.TexParameter(
             TextureTarget.Texture2D,
             TextureParameterName.TextureMagFilter,
-            (int) TextureMagFilter.Linear);
+            (int) TextureMagFilter.Nearest);
         GL.TexParameter(
             TextureTarget.Texture2D,
             TextureParameterName.TextureWrapS,
@@ -148,7 +148,6 @@ public sealed class GpuMesh3D : IDisposable
                 (IntPtr) pixelPointer);
         }
 
-        GL.GenerateMipmap(GenerateMipmapTarget.Texture2D);
         GL.BindTexture(TextureTarget.Texture2D, 0);
         return texture;
     }
