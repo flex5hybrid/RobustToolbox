@@ -72,7 +72,9 @@ public sealed class GpuMesh3D : IDisposable
 
     public void Draw()
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_disposed)
+            throw new ObjectDisposedException(nameof(GpuMesh3D));
+
         GL.BindVertexArray(_vertexArray);
         GL.DrawElements(PrimitiveType.Triangles, IndexCount, DrawElementsType.UnsignedInt, IntPtr.Zero);
     }
