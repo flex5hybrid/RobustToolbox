@@ -1,6 +1,5 @@
 using System;
 using System.Buffers.Binary;
-using System.Collections.Generic;
 using System.Numerics;
 using System.Text;
 using System.Text.Json;
@@ -44,8 +43,12 @@ public static class GltfStaticMeshLoader3D
         if (!attributes.TryGetProperty("POSITION", out var positionAccessorElement))
             throw new InvalidOperationException("glTF primitive does not contain POSITION data.");
 
-        var positionAccessor = positionAccessorElement.GetInt32();
-        var positions = ReadVector3Accessor(positionAccessor, buffers, bufferViews, accessors, "POSITION");
+        var positions = ReadVector3Accessor(
+            positionAccessorElement.GetInt32(),
+            buffers,
+            bufferViews,
+            accessors,
+            "POSITION");
         var normals = attributes.TryGetProperty("NORMAL", out var normalAccessorElement)
             ? ReadVector3Accessor(normalAccessorElement.GetInt32(), buffers, bufferViews, accessors, "NORMAL")
             : new Vector3[positions.Length];
@@ -125,7 +128,7 @@ public static class GltfStaticMeshLoader3D
 
         for (var i = 0; i < count; i++)
         {
-            var offset = i * slice.Stride;
+            var offset = slice.Offset + i * slice.Stride;
             result[i] = new Vector3(
                 ReadFloat(slice.Data, offset),
                 ReadFloat(slice.Data, offset + 4),
@@ -150,7 +153,7 @@ public static class GltfStaticMeshLoader3D
 
         for (var i = 0; i < count; i++)
         {
-            var offset = i * slice.Stride;
+            var offset = slice.Offset + i * slice.Stride;
             result[i] = new Vector2(
                 ReadFloat(slice.Data, offset),
                 ReadFloat(slice.Data, offset + 4));
@@ -184,7 +187,7 @@ public static class GltfStaticMeshLoader3D
 
         for (var i = 0; i < count; i++)
         {
-            var offset = i * slice.Stride;
+            var offset = slice.Offset + i * slice.Stride;
             result[i] = componentType switch
             {
                 ComponentByte => slice.Data[offset],
@@ -270,10 +273,5 @@ public static class GltfStaticMeshLoader3D
         return value;
     }
 
-    private readonly record struct AccessorSlice(byte[] Data, int Offset, int Stride)
-    {
-        public byte[] Data { get; } = Data;
-        public int Offset { get; } = Offset;
-        public int Stride { get; } = Stride;
-    }
+    private readonly record struct AccessorSlice(byte[] Data, int Offset, int Stride);
 }
