@@ -25,6 +25,7 @@ internal sealed class NetworkClient3D : IDisposable
     private readonly Task _writerTask;
 
     public int PlayerId { get; private set; }
+    public float FixedDelta { get; private set; } = AuthoritativeWorld3D.FixedDelta;
     public bool Connected => _socket.Connected && !_cancellation.IsCancellationRequested;
 
     private NetworkClient3D(TcpClient socket)
@@ -55,6 +56,7 @@ internal sealed class NetworkClient3D : IDisposable
             }
 
             client.PlayerId = hello.PlayerId;
+            client.FixedDelta = hello.FixedDelta > 0f ? hello.FixedDelta : AuthoritativeWorld3D.FixedDelta;
             return client;
         }
         catch
@@ -69,10 +71,22 @@ internal sealed class NetworkClient3D : IDisposable
         return _outgoing.Writer.TryWrite(input);
     }
 
+    public bool TryReadSnapshot(out SnapshotMessage3D snapshot)
+    {
+        if (_snapshots.TryDequeue(out var next))
+        {
+            snapshot = next;
+            return true;
+        }
+
+        snapshot = null!;
+        return false;
+    }
+
     public bool TryReadLatestSnapshot(out SnapshotMessage3D snapshot)
     {
         snapshot = null!;
-        while (_snapshots.TryDequeue(out var next))
+        while (TryReadSnapshot(out var next))
             snapshot = next;
 
         return snapshot is not null;
