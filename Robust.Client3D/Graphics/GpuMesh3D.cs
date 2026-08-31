@@ -1,4 +1,5 @@
 using System;
+using System.Numerics;
 using OpenToolkit.Graphics.OpenGL4;
 using Robust.Client3D.Assets;
 
@@ -10,13 +11,18 @@ public sealed class GpuMesh3D : IDisposable
     private readonly uint _vertexArray;
     private readonly uint _vertexBuffer;
     private readonly uint _indexBuffer;
+    private readonly uint _baseColorTexture;
     private bool _disposed;
 
     public int IndexCount { get; }
+    public Vector4 BaseColorFactor { get; }
+    public bool HasBaseColorTexture => _baseColorTexture != 0;
 
-    public unsafe GpuMesh3D(MeshData3D mesh)
+    public unsafe GpuMesh3D(MeshData3D mesh, MaterialData3D? material = null)
     {
         ArgumentNullException.ThrowIfNull(mesh);
+        material ??= MaterialData3D.Default;
+        BaseColorFactor = material.BaseColorFactor;
 
         var packedVertices = new float[mesh.Vertices.Length * FloatsPerVertex];
         for (var i = 0; i < mesh.Vertices.Length; i++)
@@ -68,9 +74,21 @@ public sealed class GpuMesh3D : IDisposable
         GL.EnableVertexAttribArray(1);
         GL.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, stride, 6 * sizeof(float));
         GL.EnableVertexAttribArray(2);
-
         GL.BindVertexArray(0);
+
+        if (material.BaseColorTexture is not null)
+            _baseColorTexture = CreateTexture(material.BaseColorTexture);
+
         IndexCount = mesh.Indices.Length;
+    }
+
+    public void BindBaseColorTexture()
+    {
+        if (_disposed)
+            throw new ObjectDisposedException(nameof(GpuMesh3D));
+
+        GL.ActiveTexture(TextureUnit.Texture0);
+        GL.BindTexture(TextureTarget.Texture2D, _baseColorTexture);
     }
 
     public void Draw()
@@ -87,9 +105,51 @@ public sealed class GpuMesh3D : IDisposable
         if (_disposed)
             return;
 
+        if (_baseColorTexture != 0)
+            GL.DeleteTexture(_baseColorTexture);
         GL.DeleteBuffer(_indexBuffer);
         GL.DeleteBuffer(_vertexBuffer);
         GL.DeleteVertexArray(_vertexArray);
         _disposed = true;
+    }
+
+    private static unsafe uint CreateTexture(TextureImageData3D image)
+    {
+        GL.GenTextures(1, out uint texture);
+        GL.BindTexture(TextureTarget.Texture2D, texture);
+        GL.TexParameter(
+            TextureTarget.Texture2D,
+            TextureParameterName.TextureMinFilter,
+            (int) TextureMinFilter.LinearMipmapLinear);
+        GL.TexParameter(
+            TextureTarget.Texture2D,
+            TextureParameterName.TextureMagFilter,
+            (int) TextureMagFilter.Linear);
+        GL.TexParameter(
+            TextureTarget.Texture2D,
+            TextureParameterName.TextureWrapS,
+            (int) TextureWrapMode.Repeat);
+        GL.TexParameter(
+            TextureTarget.Texture2D,
+            TextureParameterName.TextureWrapT,
+            (int) TextureWrapMode.Repeat);
+
+        fixed (byte* pixelPointer = image.RgbaPixels)
+        {
+            GL.TexImage2D(
+                TextureTarget.Texture2D,
+                0,
+                PixelInternalFormat.Rgba,
+                image.Width,
+                image.Height,
+                0,
+                PixelFormat.Rgba,
+                PixelType.UnsignedByte,
+                (IntPtr) pixelPointer);
+        }
+
+        GL.GenerateMipmap(GenerateMipmapTarget.Texture2D);
+        GL.BindTexture(TextureTarget.Texture2D, 0);
+        return texture;
     }
 }
