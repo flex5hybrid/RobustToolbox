@@ -116,6 +116,21 @@ public sealed partial class World3DGridRenderingSystem : EntitySystem
         _overlay?.SetFirstPersonPitch(_firstPersonPitch);
     }
 
+    /// <summary>
+    /// Overrides the set of map spaces rendered by the perspective pass. The active viewport map is
+    /// always included as a fallback. This lets content-level spatial systems, such as stacked decks,
+    /// expose several legacy MapIds as one 3D world without making Robust depend on content types.
+    /// </summary>
+    public void SetRenderMaps(IEnumerable<MapId> mapIds)
+    {
+        _overlay?.SetRenderMaps(mapIds);
+    }
+
+    public void ClearRenderMaps()
+    {
+        _overlay?.ClearRenderMaps();
+    }
+
     public override void Shutdown()
     {
         if (_overlay is null)
@@ -188,6 +203,7 @@ internal sealed class World3DGridOverlay : Overlay
     private readonly IClydeInternal _clyde;
     private readonly List<float> _vertices = new(256 * 1024);
     private readonly List<float> _tileVertices = new(256 * 1024);
+    private readonly HashSet<MapId> _renderMaps = new();
 
     private uint _vertexArray;
     private uint _vertexBuffer;
@@ -242,6 +258,21 @@ internal sealed class World3DGridOverlay : Overlay
         _firstPersonPitch = pitch;
     }
 
+    public void SetRenderMaps(IEnumerable<MapId> mapIds)
+    {
+        _renderMaps.Clear();
+        foreach (var mapId in mapIds)
+        {
+            if (mapId != MapId.Nullspace)
+                _renderMaps.Add(mapId);
+        }
+    }
+
+    public void ClearRenderMaps()
+    {
+        _renderMaps.Clear();
+    }
+
     protected internal override bool BeforeDraw(in OverlayDrawArgs args)
     {
         return args.MapId != MapId.Nullspace && args.Viewport.Eye is not null;
@@ -281,28 +312,46 @@ internal sealed class World3DGridOverlay : Overlay
             MathF.Sin(_firstPersonPitch));
         var target = camera + lookDirection;
 
-        // Do not use the legacy 2D viewport bounds to decide what exists in our perspective view.
-        // Enumerate the actual live grids on the eye's map, then select chunks in grid-local space
-        // around the real IEye position.
+        // Legacy SS14 still stores separate floors in separate MapIds. Content can now provide a set
+        // of those maps that represent one 3D space, and the renderer composes all of them into this pass.
         var gridCount = 0;
-        foreach (var grid in _mapSystem.GetAllGrids(args.MapId))
+        var staticEntityCount = 0;
+        var movingEntityCount = 0;
+        var characterCount = 0;
+        var renderedActiveMap = false;
+
+        if (_renderMaps.Count > 0)
         {
-            gridCount++;
-            AppendGrid(grid, eyeWorld);
+            foreach (var mapId in _renderMaps)
+            {
+                AppendMap(
+                    mapId,
+                    eyeWorld,
+                    ref gridCount,
+                    ref staticEntityCount,
+                    ref movingEntityCount,
+                    ref characterCount);
+                renderedActiveMap |= mapId == args.MapId;
+            }
         }
 
-        AppendEntities(
-            args.MapId,
-            eyeWorld,
-            out var staticEntityCount,
-            out var movingEntityCount,
-            out var characterCount);
+        if (_renderMaps.Count == 0 || !renderedActiveMap)
+        {
+            AppendMap(
+                args.MapId,
+                eyeWorld,
+                ref gridCount,
+                ref staticEntityCount,
+                ref movingEntityCount,
+                ref characterCount);
+        }
 
         var totalVertexCount = (_vertices.Count + _tileVertices.Count) / FloatsPerVertex;
         if (!_reportedGeometry && totalVertexCount > 0)
         {
+            var mapCount = _renderMaps.Count == 0 ? 1 : _renderMaps.Count + (renderedActiveMap ? 0 : 1);
             System.Console.WriteLine(
-                $"[SS14-3D] map={args.MapId}; eye={eyeWorld.X:F1},{eyeWorld.Y:F1},{cameraBase.Z:F1}; grids={gridCount}; " +
+                $"[SS14-3D] map={args.MapId}; maps={mapCount}; eye={eyeWorld.X:F1},{eyeWorld.Y:F1},{cameraBase.Z:F1}; grids={gridCount}; " +
                 $"static={staticEntityCount}; moving={movingEntityCount}; characters={characterCount}; " +
                 $"camera=first-person; vertices={totalVertexCount}; textured={_tileVertices.Count / FloatsPerVertex}");
             _reportedGeometry = true;
@@ -566,6 +615,35 @@ internal sealed class World3DGridOverlay : Overlay
         }
 
         base.DisposeBehavior();
+    }
+
+    private void AppendMap(
+        MapId mapId,
+        Vector2 eyeWorld,
+        ref int gridCount,
+        ref int staticEntityCount,
+        ref int movingEntityCount,
+        ref int characterCount)
+    {
+        if (mapId == MapId.Nullspace)
+            return;
+
+        foreach (var grid in _mapSystem.GetAllGrids(mapId))
+        {
+            gridCount++;
+            AppendGrid(grid, eyeWorld);
+        }
+
+        AppendEntities(
+            mapId,
+            eyeWorld,
+            out var mapStaticCount,
+            out var mapMovingCount,
+            out var mapCharacterCount);
+
+        staticEntityCount += mapStaticCount;
+        movingEntityCount += mapMovingCount;
+        characterCount += mapCharacterCount;
     }
 
     private void AppendGrid(Entity<MapGridComponent> grid, Vector2 eyeWorld)
