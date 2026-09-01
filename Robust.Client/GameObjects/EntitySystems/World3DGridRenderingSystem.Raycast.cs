@@ -115,6 +115,7 @@ public sealed partial class World3DGridRenderingSystem
         }
 
         var mapId = playerTransform.MapID;
+        var eyeRotation = _raycastEyeManager.CurrentEye.Rotation;
         var nearestDistance = maxDistance;
         var found = false;
 
@@ -136,7 +137,13 @@ public sealed partial class World3DGridRenderingSystem
                 if (interactionCandidate is not null && !interactionCandidate(uid))
                     continue;
 
-                bounds = _raycastSpriteSystem.CalculateBounds((uid, sprite), transform);
+                var (worldPosition, worldRotation) = _transformSystem.GetWorldPositionRotation(transform);
+                bounds = _raycastSpriteSystem.CalculateBounds(
+                        (uid, sprite),
+                        worldPosition,
+                        worldRotation,
+                        eyeRotation)
+                    .CalcBoundingBox();
             }
 
             if (bounds.Width < MinInteractionVolumeSize ||
