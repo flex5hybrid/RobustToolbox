@@ -39,6 +39,8 @@ internal sealed partial class World3DGridRenderingSystem : EntitySystem
     private float _jumpHeight;
     private float _jumpVelocity;
     private bool _jumpHeld;
+    private float _walkBobPhase;
+    private float _cameraBob;
 
     public override void Initialize()
     {
@@ -62,6 +64,8 @@ internal sealed partial class World3DGridRenderingSystem : EntitySystem
             _jumpHeight = 0f;
             _jumpVelocity = 0f;
             _jumpHeld = false;
+            _walkBobPhase = 0f;
+            _cameraBob = 0f;
         }
 
         var jumpDown = _inputManager.IsKeyDown(Keyboard.Key.Space);
@@ -82,7 +86,19 @@ internal sealed partial class World3DGridRenderingSystem : EntitySystem
             }
         }
 
-        _overlay?.SetLocalPlayerPresentation(localEntity, _jumpHeight);
+        var bobTarget = 0f;
+        if (_jumpHeight <= 0.001f &&
+            localEntity is { Valid: true } uid &&
+            TryComp(uid, out PhysicsComponent? body) &&
+            body.LinearVelocity.LengthSquared() > 0.04f)
+        {
+            var speed = MathF.Min(body.LinearVelocity.Length(), 7f);
+            _walkBobPhase += frameTime * (7.5f + speed * 1.35f);
+            bobTarget = MathF.Sin(_walkBobPhase) * 0.035f;
+        }
+
+        _cameraBob += (bobTarget - _cameraBob) * MathF.Min(1f, frameTime * 14f);
+        _overlay?.SetLocalPlayerPresentation(localEntity, _jumpHeight, _cameraBob);
     }
 
     public override void Shutdown()
@@ -104,6 +120,8 @@ internal sealed class World3DGridOverlay : Overlay
     private const float WallHeight = 2.6f;
     private const float ObjectHeight = 0.9f;
     private const float CharacterHeight = 1.7f;
+    private const float FirstPersonEyeHeight = 1.58f;
+    private static readonly float[] CrosshairVertices = CreateCrosshairVertices();
 
     private const string VertexShaderSource = """
         #version 330 core
@@ -168,6 +186,7 @@ internal sealed class World3DGridOverlay : Overlay
     private bool _initialized;
     private EntityUid? _localPlayer;
     private float _localJumpHeight;
+    private float _localCameraBob;
 
     private readonly DiagnosticStage _diagnosticStage;
 
@@ -192,10 +211,11 @@ internal sealed class World3DGridOverlay : Overlay
         System.Console.WriteLine($"[SS14-3D] render stage: {_diagnosticStage}");
     }
 
-    public void SetLocalPlayerPresentation(EntityUid? localPlayer, float jumpHeight)
+    public void SetLocalPlayerPresentation(EntityUid? localPlayer, float jumpHeight, float cameraBob)
     {
         _localPlayer = localPlayer;
         _localJumpHeight = MathF.Max(0f, jumpHeight);
+        _localCameraBob = cameraBob;
     }
 
     protected internal override bool BeforeDraw(in OverlayDrawArgs args)
@@ -212,13 +232,19 @@ internal sealed class World3DGridOverlay : Overlay
         _vertices.Clear();
         _tileVertices.Clear();
 
-        var eyeWorld = eye.Position.Position + eye.Offset;
-        var target = new Vector3(eyeWorld.X, eyeWorld.Y, 0.55f + _localJumpHeight * 0.35f);
+        // The regular 2D client offsets its eye towards the cursor. A first-person camera must stay
+        // anchored to the controlled body, otherwise moving the cursor makes the head slide through walls.
+        var eyeWorld = eye.Position.Position;
         var forward2 = eye.Rotation.ToWorldVec();
+        var camera = new Vector3(
+            eyeWorld.X,
+            eyeWorld.Y,
+            FirstPersonEyeHeight + _localJumpHeight + _localCameraBob);
 
-        // Eye angle zero means south in SS14 while MoveUp is north. Putting the camera on the
-        // eye-forward side makes north project towards the top of the screen and keeps WASD intuitive.
-        var camera = target + new Vector3(forward2.X * 9f, forward2.Y * 9f, 7f);
+        // Angle zero points south in the 2D renderer while MoveUp points north. Looking opposite
+        // eye-forward preserves the established camera-relative movement convention in first person.
+        var lookDirection = Vector3.Normalize(new Vector3(-forward2.X, -forward2.Y, -0.075f));
+        var target = camera + lookDirection;
 
         // Do not use the legacy 2D viewport bounds to decide what exists in our perspective view.
         // Enumerate the actual live grids on the eye's map, then select chunks in grid-local space
@@ -233,11 +259,9 @@ internal sealed class World3DGridOverlay : Overlay
         AppendEntities(
             args.MapId,
             eyeWorld,
-            new Vector2(camera.X, camera.Y),
             out var staticEntityCount,
             out var movingEntityCount,
-            out var characterCount,
-            out var cutAwayWallCount);
+            out var characterCount);
 
         var totalVertexCount = (_vertices.Count + _tileVertices.Count) / FloatsPerVertex;
         if (!_reportedGeometry && totalVertexCount > 0)
@@ -245,7 +269,7 @@ internal sealed class World3DGridOverlay : Overlay
             System.Console.WriteLine(
                 $"[SS14-3D] map={args.MapId}; eye={eyeWorld.X:F1},{eyeWorld.Y:F1}; grids={gridCount}; " +
                 $"static={staticEntityCount}; moving={movingEntityCount}; characters={characterCount}; " +
-                $"cutaway={cutAwayWallCount}; vertices={totalVertexCount}; textured={_tileVertices.Count / FloatsPerVertex}");
+                $"camera=first-person; vertices={totalVertexCount}; textured={_tileVertices.Count / FloatsPerVertex}");
             _reportedGeometry = true;
         }
 
@@ -254,9 +278,9 @@ internal sealed class World3DGridOverlay : Overlay
 
         var view = Matrix4x4.CreateLookAt(camera, target, Vector3.UnitZ);
         var projection = Matrix4x4.CreatePerspectiveFieldOfView(
-            MathF.PI / 3f,
+            MathF.PI * 75f / 180f,
             Math.Max(1, args.Viewport.Size.X) / (float) Math.Max(1, args.Viewport.Size.Y),
-            0.05f,
+            0.035f,
             200f);
         var mvp = view * projection;
 
@@ -372,6 +396,14 @@ internal sealed class World3DGridOverlay : Overlay
                 DrawVertexData(tileVertexData, true, tileAtlasHandle);
             else
                 DrawVertexData(tileVertexData, false, 0);
+
+            if (stage == DiagnosticStage.Tiles && _localPlayer is not null)
+            {
+                GL.Disable(EnableCap.DepthTest);
+                GL.DepthMask(false);
+                GL.Uniform1(_clipSpaceLocation, 1);
+                DrawVertexData(CrosshairVertices, false, 0);
+            }
         }
         finally
         {
@@ -558,16 +590,13 @@ internal sealed class World3DGridOverlay : Overlay
     private void AppendEntities(
         MapId mapId,
         Vector2 eyeWorld,
-        Vector2 cameraWorld,
         out int staticEntityCount,
         out int movingEntityCount,
-        out int characterCount,
-        out int cutAwayWallCount)
+        out int characterCount)
     {
         staticEntityCount = 0;
         movingEntityCount = 0;
         characterCount = 0;
-        cutAwayWallCount = 0;
 
         var query = _entityManager.AllEntityQueryEnumerator<
             TransformComponent,
@@ -617,8 +646,8 @@ internal sealed class World3DGridOverlay : Overlay
             if ((body.BodyType & BodyType.KinematicController) != 0)
             {
                 characterCount++;
-                var jumpHeight = uid == _localPlayer ? _localJumpHeight : 0f;
-                AddCharacter(bounds, EntityColor(uid, true), jumpHeight);
+                if (uid != _localPlayer)
+                    AddCharacter(bounds, EntityColor(uid, true));
                 continue;
             }
 
@@ -633,12 +662,6 @@ internal sealed class World3DGridOverlay : Overlay
             if (_entityManager.TryGetComponent(uid, out OccluderComponent? occluder) && occluder.Enabled)
             {
                 var worldMatrix = _transformSystem.GetWorldMatrix(xform);
-                if (ShouldCutAwayOccluder(occluder.Polygon, worldMatrix, cameraWorld, eyeWorld))
-                {
-                    cutAwayWallCount++;
-                    continue;
-                }
-
                 AddPrism(
                     occluder.Polygon,
                     worldMatrix,
@@ -667,80 +690,23 @@ internal sealed class World3DGridOverlay : Overlay
         AddWallSide(p3, p0, bottom, top, color * 0.72f);
     }
 
-    private void AddCharacter(Box2 bounds, Vector3 color, float verticalOffset)
+    private void AddCharacter(Box2 bounds, Vector3 color)
     {
         var radius = Math.Clamp(MathF.Max(bounds.Width, bounds.Height) * 0.48f, 0.22f, 0.46f);
         AddCylinder(
             bounds.Center,
             radius,
-            0.02f + verticalOffset,
-            CharacterHeight * 0.72f + verticalOffset,
+            0.02f,
+            CharacterHeight * 0.72f,
             color,
             8);
         AddCylinder(
             bounds.Center,
             radius * 0.72f,
-            CharacterHeight * 0.72f + verticalOffset,
-            CharacterHeight + verticalOffset,
+            CharacterHeight * 0.72f,
+            CharacterHeight,
             Lighten(color, 1.12f),
             8);
-    }
-
-    private static bool ShouldCutAwayOccluder(
-        ReadOnlySpan<Vector2> localPolygon,
-        Matrix3x2 worldMatrix,
-        Vector2 camera,
-        Vector2 target)
-    {
-        if (localPolygon.Length < 3)
-            return false;
-
-        var first = Vector2.Transform(localPolygon[0], worldMatrix);
-        var min = first;
-        var max = first;
-        for (var i = 1; i < localPolygon.Length; i++)
-        {
-            var point = Vector2.Transform(localPolygon[i], worldMatrix);
-            min = Vector2.Min(min, point);
-            max = Vector2.Max(max, point);
-        }
-
-        var bounds = new Box2(min, max).Enlarged(0.28f);
-        return SegmentIntersectsBox(
-            Vector2.Lerp(camera, target, 0.08f),
-            Vector2.Lerp(camera, target, 0.90f),
-            bounds);
-    }
-
-    private static bool SegmentIntersectsBox(Vector2 start, Vector2 end, Box2 bounds)
-    {
-        var direction = end - start;
-        var minimum = 0f;
-        var maximum = 1f;
-
-        return ClipAxis(start.X, direction.X, bounds.Left, bounds.Right, ref minimum, ref maximum) &&
-               ClipAxis(start.Y, direction.Y, bounds.Bottom, bounds.Top, ref minimum, ref maximum);
-    }
-
-    private static bool ClipAxis(
-        float origin,
-        float direction,
-        float minimumBound,
-        float maximumBound,
-        ref float minimum,
-        ref float maximum)
-    {
-        if (MathF.Abs(direction) < 0.00001f)
-            return origin >= minimumBound && origin <= maximumBound;
-
-        var first = (minimumBound - origin) / direction;
-        var second = (maximumBound - origin) / direction;
-        if (first > second)
-            (first, second) = (second, first);
-
-        minimum = MathF.Max(minimum, first);
-        maximum = MathF.Min(maximum, second);
-        return minimum <= maximum;
     }
 
     private void AddCylinder(
@@ -985,6 +951,41 @@ internal sealed class World3DGridOverlay : Overlay
         vertices.Add(color.Z);
         vertices.Add(uv.X);
         vertices.Add(uv.Y);
+    }
+
+    private static float[] CreateCrosshairVertices()
+    {
+        var vertices = new List<float>(24 * FloatsPerVertex);
+        var color = new Vector3(0.92f, 0.96f, 1f);
+        const float gap = 0.007f;
+        const float length = 0.022f;
+        const float thickness = 0.0022f;
+
+        AddClipQuad(vertices, -gap - length, -thickness, -gap, thickness, color);
+        AddClipQuad(vertices, gap, -thickness, gap + length, thickness, color);
+        AddClipQuad(vertices, -thickness, gap, thickness, gap + length, color);
+        AddClipQuad(vertices, -thickness, -gap - length, thickness, -gap, color);
+        return vertices.ToArray();
+    }
+
+    private static void AddClipQuad(
+        List<float> vertices,
+        float left,
+        float bottom,
+        float right,
+        float top,
+        Vector3 color)
+    {
+        var p0 = new Vector3(left, bottom, 0f);
+        var p1 = new Vector3(right, bottom, 0f);
+        var p2 = new Vector3(right, top, 0f);
+        var p3 = new Vector3(left, top, 0f);
+        AddVertex(vertices, p0, color, Vector2.Zero);
+        AddVertex(vertices, p1, color, Vector2.Zero);
+        AddVertex(vertices, p2, color, Vector2.Zero);
+        AddVertex(vertices, p0, color, Vector2.Zero);
+        AddVertex(vertices, p2, color, Vector2.Zero);
+        AddVertex(vertices, p3, color, Vector2.Zero);
     }
 
     private static Vector3 TileColor(int typeId)
