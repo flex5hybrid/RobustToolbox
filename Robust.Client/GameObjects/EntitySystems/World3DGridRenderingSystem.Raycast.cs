@@ -3,6 +3,7 @@ using System.Numerics;
 using Robust.Client.Graphics;
 using Robust.Shared.GameObjects;
 using Robust.Shared.IoC;
+using Robust.Shared.Map;
 using Robust.Shared.Map.Components;
 using Robust.Shared.Maths;
 using Robust.Shared.Physics;
@@ -21,8 +22,11 @@ public sealed partial class World3DGridRenderingSystem
     private const float RaycastObjectHeight = 0.9f;
     private const float RaycastCharacterHeight = 1.7f;
     private const float RaycastEyeHeight = 1.58f;
+    private const float MinInteractionVolumeSize = 0.02f;
+    private const float MaxInteractionVolumeSize = 6f;
 
     [Dependency] private IEyeManager _raycastEyeManager = default!;
+    [Dependency] private SpriteSystem _raycastSpriteSystem = default!;
 
     /// <summary>
     /// Gets the exact ray used by the first-person perspective camera.
@@ -61,11 +65,44 @@ public sealed partial class World3DGridRenderingSystem
     }
 
     /// <summary>
-    /// Returns the nearest physical entity intersected by the center-screen first-person ray.
-    /// Existing 2D fixtures are temporarily extruded into volumetric AABBs so interaction targeting
-    /// already respects height while the full 3D physics solver is still under construction.
+    /// Converts the centre-screen ray into normal SS14 coordinates for pointer actions which do not hit an entity.
+    /// The Z coordinate is intentionally discarded here: this is only a compatibility bridge while the shared
+    /// interaction protocol still carries EntityCoordinates rather than a 3D world point.
     /// </summary>
+    public bool TryGetFirstPersonAimCoordinates(float maxDistance, out EntityCoordinates coordinates)
+    {
+        coordinates = default;
+
+        if (!float.IsFinite(maxDistance) || maxDistance <= 0f ||
+            _playerManager.LocalEntity is not { Valid: true } player ||
+            !TryComp(player, out TransformComponent? playerTransform) ||
+            !TryGetFirstPersonRay(out var origin, out var direction))
+        {
+            return false;
+        }
+
+        var point = origin + direction * maxDistance;
+        var mapCoordinates = new MapCoordinates(new Vector2(point.X, point.Y), playerTransform.MapID);
+        coordinates = _transformSystem.ToCoordinates(player, mapCoordinates);
+        return true;
+    }
+
     public bool TryRaycastFirstPerson(float maxDistance, out World3DRaycastHit hit)
+    {
+        return TryRaycastFirstPerson(maxDistance, null, out hit);
+    }
+
+    /// <summary>
+    /// Returns the nearest entity intersected by the centre-screen first-person ray.
+    /// Hard 2D fixtures are treated as volumetric blockers exactly as before. In addition, callers can nominate
+    /// entities which should receive a sprite-backed interaction volume when they do not have a hard fixture.
+    /// This keeps decorative sprites out of the spatial query while allowing UI machines, items and wall devices
+    /// to participate in genuine centre-screen targeting before the full 3D physics solver exists.
+    /// </summary>
+    public bool TryRaycastFirstPerson(
+        float maxDistance,
+        Func<EntityUid, bool>? interactionCandidate,
+        out World3DRaycastHit hit)
     {
         hit = default;
 
@@ -81,13 +118,11 @@ public sealed partial class World3DGridRenderingSystem
         var nearestDistance = maxDistance;
         var found = false;
 
-        var query = EntityManager.AllEntityQueryEnumerator<TransformComponent, PhysicsComponent, FixturesComponent, SpriteComponent>();
-        while (query.MoveNext(out var uid, out var transform, out var body, out var fixtures, out var sprite))
+        var query = EntityManager.AllEntityQueryEnumerator<TransformComponent, SpriteComponent>();
+        while (query.MoveNext(out var uid, out var transform, out var sprite))
         {
             if (uid == player ||
                 transform.MapID != mapId ||
-                !body.CanCollide ||
-                !body.Hard ||
                 !sprite._visible ||
                 (sprite._containerOccluded && !sprite.OverrideContainerOcclusion) ||
                 HasComp<MapGridComponent>(uid))
@@ -95,26 +130,22 @@ public sealed partial class World3DGridRenderingSystem
                 continue;
             }
 
-            var (worldPosition, worldRotation) = _transformSystem.GetWorldPositionRotation(transform);
-            var physicsTransform = new Robust.Shared.Physics.Transform(worldPosition, worldRotation);
-            var bounds = default(Box2);
-            var hasBounds = false;
-
-            foreach (var fixture in fixtures.Fixtures.Values)
+            var hasHardFixtureBounds = TryGetHardFixtureBounds(uid, transform, out var bounds, out var body);
+            if (!hasHardFixtureBounds)
             {
-                if (!fixture.Hard)
+                if (interactionCandidate is not null && !interactionCandidate(uid))
                     continue;
 
-                for (var child = 0; child < fixture.Shape.ChildCount; child++)
-                {
-                    var childBounds = fixture.Shape.ComputeAABB(physicsTransform, child);
-                    bounds = hasBounds ? bounds.Union(childBounds) : childBounds;
-                    hasBounds = true;
-                }
+                bounds = _raycastSpriteSystem.CalculateBounds((uid, sprite), transform);
             }
 
-            if (!hasBounds || bounds.Width < 0.02f || bounds.Height < 0.02f)
+            if (bounds.Width < MinInteractionVolumeSize ||
+                bounds.Height < MinInteractionVolumeSize ||
+                bounds.Width > MaxInteractionVolumeSize ||
+                bounds.Height > MaxInteractionVolumeSize)
+            {
                 continue;
+            }
 
             var baseZ = _transform3DSystem.GetWorldZ(uid);
             var topZ = GetRaycastTop(uid, body, bounds, baseZ);
@@ -132,20 +163,58 @@ public sealed partial class World3DGridRenderingSystem
         return found;
     }
 
-    private float GetRaycastTop(EntityUid uid, PhysicsComponent body, Box2 bounds, float baseZ)
+    private bool TryGetHardFixtureBounds(
+        EntityUid uid,
+        TransformComponent transform,
+        out Box2 bounds,
+        out PhysicsComponent? body)
     {
-        if ((body.BodyType & BodyType.KinematicController) != 0)
-            return baseZ + RaycastCharacterHeight;
+        bounds = default;
+        body = null;
 
-        if (body.BodyType != BodyType.Static)
-            return baseZ + RaycastObjectHeight * 0.72f;
+        if (!TryComp(uid, out body) ||
+            !TryComp(uid, out FixturesComponent? fixtures) ||
+            !body.CanCollide ||
+            !body.Hard)
+        {
+            return false;
+        }
 
-        if (TryComp(uid, out OccluderComponent? occluder) && occluder.Enabled)
-            return baseZ + RaycastWallHeight;
+        var (worldPosition, worldRotation) = _transformSystem.GetWorldPositionRotation(transform);
+        var physicsTransform = new Robust.Shared.Physics.Transform(worldPosition, worldRotation);
+        var hasBounds = false;
 
-        var height = bounds.MaxDimension > 1.4f
-            ? RaycastObjectHeight * 1.35f
-            : RaycastObjectHeight;
+        foreach (var fixture in fixtures.Fixtures.Values)
+        {
+            if (!fixture.Hard)
+                continue;
+
+            for (var child = 0; child < fixture.Shape.ChildCount; child++)
+            {
+                var childBounds = fixture.Shape.ComputeAABB(physicsTransform, child);
+                bounds = hasBounds ? bounds.Union(childBounds) : childBounds;
+                hasBounds = true;
+            }
+        }
+
+        return hasBounds;
+    }
+
+    private float GetRaycastTop(EntityUid uid, PhysicsComponent? body, Box2 bounds, float baseZ)
+    {
+        if (body is not null)
+        {
+            if ((body.BodyType & BodyType.KinematicController) != 0)
+                return baseZ + RaycastCharacterHeight;
+
+            if (body.BodyType != BodyType.Static)
+                return baseZ + Math.Clamp(bounds.MaxDimension * 0.72f, 0.35f, RaycastObjectHeight);
+
+            if (TryComp(uid, out OccluderComponent? occluder) && occluder.Enabled)
+                return baseZ + RaycastWallHeight;
+        }
+
+        var height = Math.Clamp(bounds.MaxDimension * 0.85f, 0.35f, 1.6f);
         return baseZ + height;
     }
 
