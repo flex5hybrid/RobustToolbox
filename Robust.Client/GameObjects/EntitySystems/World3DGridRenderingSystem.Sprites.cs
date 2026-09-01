@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 using Robust.Client.Graphics;
+using Robust.Client.Utility;
 using Robust.Shared.Graphics.RSI;
 using Robust.Shared.Maths;
 
