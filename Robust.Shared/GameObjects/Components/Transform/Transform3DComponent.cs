@@ -2,6 +2,7 @@ using System;
 using System.Numerics;
 using Robust.Shared.GameStates;
 using Robust.Shared.Serialization;
+using Robust.Shared.ViewVariables;
 
 namespace Robust.Shared.GameObjects;
 
