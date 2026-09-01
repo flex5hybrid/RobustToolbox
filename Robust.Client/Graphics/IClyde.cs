@@ -4,6 +4,7 @@ using System.Diagnostics.Contracts;
 using System.IO;
 using System.Numerics;
 using System.Threading.Tasks;
+using Robust.Client.Input;
 using Robust.Shared.GameObjects;
 using Robust.Shared.Graphics;
 using Robust.Shared.Maths;
@@ -55,6 +56,11 @@ namespace Robust.Client.Graphics
         event Action<WindowResizedEventArgs> OnWindowResized;
 
         event Action<WindowFocusedEventArgs> OnWindowFocused;
+
+        /// <summary>
+        /// Raised for absolute and relative mouse motion reported by the active window.
+        /// </summary>
+        event Action<MouseMoveEventArgs> MouseMove;
 
         event Action<WindowContentScaleEventArgs> OnWindowScaleChanged;
 

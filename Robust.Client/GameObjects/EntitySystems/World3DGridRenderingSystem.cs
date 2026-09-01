@@ -24,8 +24,10 @@ namespace Robust.Client.GameObjects;
 /// The simulation, networking, eye and map grids are all the normal Robust ECS objects;
 /// only the final world presentation is replaced by a perspective OpenGL pass.
 /// </summary>
-internal sealed partial class World3DGridRenderingSystem : EntitySystem
+public sealed partial class World3DGridRenderingSystem : EntitySystem
 {
+    public const float DefaultFirstPersonPitch = -0.075f;
+
     [Dependency] private IOverlayManager _overlayManager = default!;
     [Dependency] private TransformSystem _transformSystem = default!;
     [Dependency] private SharedMapSystem _mapSystem = default!;
@@ -41,6 +43,7 @@ internal sealed partial class World3DGridRenderingSystem : EntitySystem
     private bool _jumpHeld;
     private float _walkBobPhase;
     private float _cameraBob;
+    private float _firstPersonPitch = DefaultFirstPersonPitch;
 
     public override void Initialize()
     {
@@ -66,6 +69,7 @@ internal sealed partial class World3DGridRenderingSystem : EntitySystem
             _jumpHeld = false;
             _walkBobPhase = 0f;
             _cameraBob = 0f;
+            SetFirstPersonPitch(DefaultFirstPersonPitch);
         }
 
         var jumpDown = _inputManager.IsKeyDown(Keyboard.Key.Space);
@@ -99,6 +103,15 @@ internal sealed partial class World3DGridRenderingSystem : EntitySystem
 
         _cameraBob += (bobTarget - _cameraBob) * MathF.Min(1f, frameTime * 14f);
         _overlay?.SetLocalPlayerPresentation(localEntity, _jumpHeight, _cameraBob);
+    }
+
+    public void SetFirstPersonPitch(float pitch)
+    {
+        if (!float.IsFinite(pitch))
+            return;
+
+        _firstPersonPitch = Math.Clamp(pitch, -1.35f, 1.35f);
+        _overlay?.SetFirstPersonPitch(_firstPersonPitch);
     }
 
     public override void Shutdown()
@@ -187,6 +200,7 @@ internal sealed class World3DGridOverlay : Overlay
     private EntityUid? _localPlayer;
     private float _localJumpHeight;
     private float _localCameraBob;
+    private float _firstPersonPitch = World3DGridRenderingSystem.DefaultFirstPersonPitch;
 
     private readonly DiagnosticStage _diagnosticStage;
 
@@ -218,6 +232,11 @@ internal sealed class World3DGridOverlay : Overlay
         _localCameraBob = cameraBob;
     }
 
+    public void SetFirstPersonPitch(float pitch)
+    {
+        _firstPersonPitch = pitch;
+    }
+
     protected internal override bool BeforeDraw(in OverlayDrawArgs args)
     {
         return args.MapId != MapId.Nullspace && args.Viewport.Eye is not null;
@@ -243,7 +262,11 @@ internal sealed class World3DGridOverlay : Overlay
 
         // Angle zero points south in the 2D renderer while MoveUp points north. Looking opposite
         // eye-forward preserves the established camera-relative movement convention in first person.
-        var lookDirection = Vector3.Normalize(new Vector3(-forward2.X, -forward2.Y, -0.075f));
+        var horizontalLook = MathF.Cos(_firstPersonPitch);
+        var lookDirection = new Vector3(
+            -forward2.X * horizontalLook,
+            -forward2.Y * horizontalLook,
+            MathF.Sin(_firstPersonPitch));
         var target = camera + lookDirection;
 
         // Do not use the legacy 2D viewport bounds to decide what exists in our perspective view.

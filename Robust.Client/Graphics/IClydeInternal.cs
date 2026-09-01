@@ -27,7 +27,6 @@ namespace Robust.Client.Graphics
 
         event Action<TextEnteredEventArgs> TextEntered;
         event Action<TextEditingEventArgs> TextEditing;
-        event Action<MouseMoveEventArgs> MouseMove;
         event Action<MouseEnterLeaveEventArgs> MouseEnterLeave;
         event Action<KeyEventArgs> KeyUp;
         event Action<KeyEventArgs> KeyDown;
