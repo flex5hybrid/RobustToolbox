@@ -9,6 +9,8 @@ using Robust.Shared.IoC;
 using Robust.Shared.Map;
 using Robust.Shared.Map.Components;
 using Robust.Shared.Maths;
+using Robust.Shared.Physics;
+using Robust.Shared.Physics.Components;
 
 namespace Robust.Client.GameObjects;
 
@@ -27,7 +29,7 @@ internal sealed class World3DGridRenderingSystem : EntitySystem
 
     public override void Initialize()
     {
-        _overlay = new World3DGridOverlay(_transformSystem, _mapSystem);
+        _overlay = new World3DGridOverlay(EntityManager, _transformSystem, _mapSystem);
         _overlayManager.AddOverlay(_overlay);
     }
 
@@ -47,6 +49,9 @@ internal sealed class World3DGridOverlay : Overlay
     private const int FloatsPerVertex = 6;
     private const float FloorBottom = -0.12f;
     private const float RenderRadius = 28f;
+    private const float WallHeight = 2.6f;
+    private const float ObjectHeight = 0.9f;
+    private const float CharacterHeight = 1.7f;
 
     private const string VertexShaderSource = """
         #version 330 core
@@ -74,9 +79,10 @@ internal sealed class World3DGridOverlay : Overlay
         }
         """;
 
+    private readonly IEntityManager _entityManager;
     private readonly SharedTransformSystem _transformSystem;
     private readonly SharedMapSystem _mapSystem;
-    private readonly List<float> _vertices = new(64 * 1024);
+    private readonly List<float> _vertices = new(256 * 1024);
 
     private uint _vertexArray;
     private uint _vertexBuffer;
@@ -93,8 +99,12 @@ internal sealed class World3DGridOverlay : Overlay
     public override OverlaySpace Space => OverlaySpace.WorldSpace;
     public override bool OverwriteTargetFrameBuffer => false;
 
-    public World3DGridOverlay(SharedTransformSystem transformSystem, SharedMapSystem mapSystem)
+    public World3DGridOverlay(
+        IEntityManager entityManager,
+        SharedTransformSystem transformSystem,
+        SharedMapSystem mapSystem)
     {
+        _entityManager = entityManager;
         _transformSystem = transformSystem;
         _mapSystem = mapSystem;
         _diagnosticStage = ParseDiagnosticStage(Environment.GetEnvironmentVariable("SS14_3D_DIAGNOSTIC"));
@@ -127,10 +137,19 @@ internal sealed class World3DGridOverlay : Overlay
             AppendGrid(grid, eyeWorld);
         }
 
-        if (!_reportedGeometry)
+        AppendEntities(
+            args.MapId,
+            eyeWorld,
+            out var staticEntityCount,
+            out var movingEntityCount,
+            out var characterCount);
+
+        if (!_reportedGeometry && _vertices.Count > 0)
         {
             System.Console.WriteLine(
-                $"[SS14-3D] map={args.MapId}; eye={eyeWorld.X:F1},{eyeWorld.Y:F1}; grids={gridCount}; vertices={_vertices.Count / FloatsPerVertex}");
+                $"[SS14-3D] map={args.MapId}; eye={eyeWorld.X:F1},{eyeWorld.Y:F1}; grids={gridCount}; " +
+                $"static={staticEntityCount}; moving={movingEntityCount}; characters={characterCount}; " +
+                $"vertices={_vertices.Count / FloatsPerVertex}");
             _reportedGeometry = true;
         }
 
@@ -393,6 +412,209 @@ internal sealed class World3DGridOverlay : Overlay
                 }
             }
         }
+    }
+
+    private void AppendEntities(
+        MapId mapId,
+        Vector2 eyeWorld,
+        out int staticEntityCount,
+        out int movingEntityCount,
+        out int characterCount)
+    {
+        staticEntityCount = 0;
+        movingEntityCount = 0;
+        characterCount = 0;
+
+        var query = _entityManager.AllEntityQueryEnumerator<
+            TransformComponent,
+            PhysicsComponent,
+            FixturesComponent,
+            SpriteComponent>();
+
+        while (query.MoveNext(out var uid, out var xform, out var body, out var fixtures, out var sprite))
+        {
+            if (xform.MapID != mapId ||
+                !body.CanCollide ||
+                !body.Hard ||
+                !sprite._visible ||
+                (sprite._containerOccluded && !sprite.OverrideContainerOcclusion) ||
+                _entityManager.HasComponent<MapGridComponent>(uid))
+            {
+                continue;
+            }
+
+            var (worldPosition, worldRotation) = _transformSystem.GetWorldPositionRotation(xform);
+            if (MathF.Abs(worldPosition.X - eyeWorld.X) > RenderRadius ||
+                MathF.Abs(worldPosition.Y - eyeWorld.Y) > RenderRadius)
+            {
+                continue;
+            }
+
+            var physicsTransform = new Robust.Shared.Physics.Transform(worldPosition, worldRotation);
+            var bounds = default(Box2);
+            var hasBounds = false;
+
+            foreach (var fixture in fixtures.Fixtures.Values)
+            {
+                if (!fixture.Hard)
+                    continue;
+
+                for (var child = 0; child < fixture.Shape.ChildCount; child++)
+                {
+                    var childBounds = fixture.Shape.ComputeAABB(physicsTransform, child);
+                    bounds = hasBounds ? bounds.Union(childBounds) : childBounds;
+                    hasBounds = true;
+                }
+            }
+
+            if (!hasBounds || bounds.Width < 0.04f || bounds.Height < 0.04f)
+                continue;
+
+            if ((body.BodyType & BodyType.KinematicController) != 0)
+            {
+                characterCount++;
+                AddCharacter(bounds, EntityColor(uid, true));
+                continue;
+            }
+
+            if (body.BodyType != BodyType.Static)
+            {
+                movingEntityCount++;
+                AddBox(bounds, 0.02f, ObjectHeight * 0.72f, EntityColor(uid, true) * 0.84f);
+                continue;
+            }
+
+            staticEntityCount++;
+            if (_entityManager.TryGetComponent(uid, out OccluderComponent? occluder) && occluder.Enabled)
+            {
+                AddPrism(
+                    occluder.Polygon,
+                    _transformSystem.GetWorldMatrix(xform),
+                    0.01f,
+                    WallHeight,
+                    EntityColor(uid, false));
+                continue;
+            }
+
+            var height = bounds.MaxDimension > 1.4f ? ObjectHeight * 1.35f : ObjectHeight;
+            AddBox(bounds, 0.01f, height, EntityColor(uid, false) * 0.82f);
+        }
+    }
+
+    private void AddBox(Box2 bounds, float bottom, float top, Vector3 color)
+    {
+        var p0 = bounds.BottomLeft;
+        var p1 = bounds.BottomRight;
+        var p2 = bounds.TopRight;
+        var p3 = bounds.TopLeft;
+
+        AddQuad(p0, p1, p2, p3, top, Lighten(color, 1.18f));
+        AddWallSide(p0, p1, bottom, top, color * 0.66f);
+        AddWallSide(p1, p2, bottom, top, color * 0.76f);
+        AddWallSide(p2, p3, bottom, top, color * 0.86f);
+        AddWallSide(p3, p0, bottom, top, color * 0.72f);
+    }
+
+    private void AddCharacter(Box2 bounds, Vector3 color)
+    {
+        var radius = Math.Clamp(MathF.Max(bounds.Width, bounds.Height) * 0.48f, 0.22f, 0.46f);
+        AddCylinder(bounds.Center, radius, 0.02f, CharacterHeight * 0.72f, color, 8);
+        AddCylinder(
+            bounds.Center,
+            radius * 0.72f,
+            CharacterHeight * 0.72f,
+            CharacterHeight,
+            Lighten(color, 1.12f),
+            8);
+    }
+
+    private void AddCylinder(
+        Vector2 center,
+        float radius,
+        float bottom,
+        float top,
+        Vector3 color,
+        int segments)
+    {
+        var ring = new Vector2[segments];
+        for (var i = 0; i < segments; i++)
+        {
+            var angle = MathF.Tau * i / segments;
+            ring[i] = center + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * radius;
+        }
+
+        var topCenter = new Vector3(center, top);
+        var topColor = Lighten(color, 1.16f);
+        for (var i = 0; i < segments; i++)
+        {
+            var next = (i + 1) % segments;
+            AddTriangle(topCenter, new Vector3(ring[i], top), new Vector3(ring[next], top), topColor);
+            AddWallSide(ring[i], ring[next], bottom, top, color * (0.68f + i % 4 * 0.06f));
+        }
+    }
+
+    private void AddPrism(
+        ReadOnlySpan<Vector2> localPolygon,
+        Matrix3x2 worldMatrix,
+        float bottom,
+        float top,
+        Vector3 color)
+    {
+        if (localPolygon.Length < 3)
+            return;
+
+        var worldPolygon = new Vector2[localPolygon.Length];
+        for (var i = 0; i < localPolygon.Length; i++)
+            worldPolygon[i] = Vector2.Transform(localPolygon[i], worldMatrix);
+
+        var topColor = Lighten(color, 1.18f);
+        for (var i = 1; i < worldPolygon.Length - 1; i++)
+        {
+            AddTriangle(
+                new Vector3(worldPolygon[0], top),
+                new Vector3(worldPolygon[i], top),
+                new Vector3(worldPolygon[i + 1], top),
+                topColor);
+        }
+
+        for (var i = 0; i < worldPolygon.Length; i++)
+        {
+            var next = (i + 1) % worldPolygon.Length;
+            AddWallSide(worldPolygon[i], worldPolygon[next], bottom, top, color * (0.66f + i % 3 * 0.08f));
+        }
+    }
+
+    private void AddWallSide(Vector2 a, Vector2 b, float bottom, float top, Vector3 color)
+    {
+        var bottomA = new Vector3(a, bottom);
+        var bottomB = new Vector3(b, bottom);
+        var topA = new Vector3(a, top);
+        var topB = new Vector3(b, top);
+
+        AddTriangle(bottomA, bottomB, topB, color);
+        AddTriangle(bottomA, topB, topA, color);
+    }
+
+    private static Vector3 EntityColor(EntityUid uid, bool dynamic)
+    {
+        var hash = unchecked((uint) uid.GetHashCode() * 2246822519u + 3266489917u);
+        if (dynamic)
+        {
+            return new Vector3(
+                0.78f + ((hash >> 16) & 0xFF) / 255f * 0.18f,
+                0.34f + ((hash >> 8) & 0xFF) / 255f * 0.24f,
+                0.16f + (hash & 0xFF) / 255f * 0.18f);
+        }
+
+        return new Vector3(
+            0.30f + ((hash >> 16) & 0xFF) / 255f * 0.16f,
+            0.43f + ((hash >> 8) & 0xFF) / 255f * 0.18f,
+            0.52f + (hash & 0xFF) / 255f * 0.20f);
+    }
+
+    private static Vector3 Lighten(Vector3 color, float factor)
+    {
+        return Vector3.Min(color * factor, Vector3.One);
     }
 
     private void AddExposedSide(
