@@ -161,6 +161,128 @@ internal sealed partial class World3DGridOverlay
         return appendedAny;
     }
 
+    /// <summary>
+    /// Wraps the current live wall sprite around the real occluder prism. This keeps the wall's existing
+    /// 3D footprint and height while replacing the debug EntityColor box with the actual RSI frame.
+    /// Every visible sprite layer is applied to the vertical faces and the top cap, so damage/variant
+    /// overlays can continue to follow the normal SpriteComponent state.
+    /// </summary>
+    private bool TryAppendTexturedPrism(
+        SpriteComponent sprite,
+        Angle worldRotation,
+        Angle eyeRotation,
+        ReadOnlySpan<Vector2> localPolygon,
+        Matrix3x2 worldMatrix,
+        float bottom,
+        float top,
+        Vector2 billboardForward)
+    {
+        if (localPolygon.Length < 3 || sprite.Layers.Count == 0)
+            return false;
+
+        var worldPolygon = new Vector2[localPolygon.Length];
+        var minX = float.PositiveInfinity;
+        var minY = float.PositiveInfinity;
+        var maxX = float.NegativeInfinity;
+        var maxY = float.NegativeInfinity;
+
+        for (var i = 0; i < localPolygon.Length; i++)
+        {
+            var local = localPolygon[i];
+            worldPolygon[i] = Vector2.Transform(local, worldMatrix);
+            minX = MathF.Min(minX, local.X);
+            minY = MathF.Min(minY, local.Y);
+            maxX = MathF.Max(maxX, local.X);
+            maxY = MathF.Max(maxY, local.Y);
+        }
+
+        var localWidth = MathF.Max(0.001f, maxX - minX);
+        var localHeight = MathF.Max(0.001f, maxY - minY);
+        var apparentAngle = (worldRotation + eyeRotation).Reduced().FlipPositive();
+        var drawOrder = 0;
+        var appendedAny = false;
+
+        foreach (var layer in sprite.Layers)
+        {
+            if (!TryGetSpriteLayerFrame(sprite, layer, apparentAngle, out var texture, out _) ||
+                !TryResolveSpriteTexture(texture, out var textureHandle, out var uvRegion))
+            {
+                continue;
+            }
+
+            var modulation = sprite.color * layer.Color;
+            if (modulation.A <= 0.01f)
+                continue;
+
+            var color = new Vector3(
+                Math.Clamp(modulation.R, 0f, 1f),
+                Math.Clamp(modulation.G, 0f, 1f),
+                Math.Clamp(modulation.B, 0f, 1f));
+
+            if (!_spriteVertices.TryGetValue(textureHandle, out var vertices))
+            {
+                vertices = new List<float>(512);
+                _spriteVertices.Add(textureHandle, vertices);
+            }
+
+            // Pull each later layer a fraction toward the camera so normal SS14 layer order survives
+            // depth testing even when layers use different texture atlases.
+            var cameraOffset = -billboardForward * ((drawOrder + 1) * SpriteLayerDepthStep);
+            var verticalOffset = (drawOrder + 1) * SpriteLayerDepthStep * 0.35f;
+
+            var uvBottomLeft = new Vector2(uvRegion.Left, uvRegion.Bottom);
+            var uvBottomRight = new Vector2(uvRegion.Right, uvRegion.Bottom);
+            var uvTopRight = new Vector2(uvRegion.Right, uvRegion.Top);
+            var uvTopLeft = new Vector2(uvRegion.Left, uvRegion.Top);
+
+            // Repeat the current wall frame on every vertical face. This deliberately preserves the
+            // recognizable SS14 artwork while the underlying polygon still supplies true 3D thickness.
+            for (var i = 0; i < worldPolygon.Length; i++)
+            {
+                var next = (i + 1) % worldPolygon.Length;
+                var a = worldPolygon[i] + cameraOffset;
+                var b = worldPolygon[next] + cameraOffset;
+                var bottomA = new Vector3(a, bottom + verticalOffset);
+                var bottomB = new Vector3(b, bottom + verticalOffset);
+                var topA = new Vector3(a, top + verticalOffset);
+                var topB = new Vector3(b, top + verticalOffset);
+
+                AddVertex(vertices, bottomA, color, uvBottomLeft);
+                AddVertex(vertices, bottomB, color, uvBottomRight);
+                AddVertex(vertices, topB, color, uvTopRight);
+                AddVertex(vertices, bottomA, color, uvBottomLeft);
+                AddVertex(vertices, topB, color, uvTopRight);
+                AddVertex(vertices, topA, color, uvTopLeft);
+            }
+
+            Vector2 TopUv(Vector2 local)
+            {
+                var u = (local.X - minX) / localWidth;
+                var v = (local.Y - minY) / localHeight;
+                return new Vector2(
+                    uvRegion.Left + u * uvRegion.Width,
+                    uvRegion.Bottom + v * uvRegion.Height);
+            }
+
+            // The top cap uses the sprite as a planar texture. This is especially useful for the normal
+            // top-down wall artwork, which remains recognizable when the player looks down from above.
+            for (var i = 1; i < worldPolygon.Length - 1; i++)
+            {
+                var p0 = new Vector3(worldPolygon[0] + cameraOffset, top + verticalOffset);
+                var p1 = new Vector3(worldPolygon[i] + cameraOffset, top + verticalOffset);
+                var p2 = new Vector3(worldPolygon[i + 1] + cameraOffset, top + verticalOffset);
+                AddVertex(vertices, p0, color, TopUv(localPolygon[0]));
+                AddVertex(vertices, p1, color, TopUv(localPolygon[i]));
+                AddVertex(vertices, p2, color, TopUv(localPolygon[i + 1]));
+            }
+
+            drawOrder++;
+            appendedAny = true;
+        }
+
+        return appendedAny;
+    }
+
     private static bool TryGetSpriteLayerFrame(
         SpriteComponent sprite,
         SpriteComponent.Layer layer,
