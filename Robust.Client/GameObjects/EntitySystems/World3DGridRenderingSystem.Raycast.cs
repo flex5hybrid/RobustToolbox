@@ -81,7 +81,7 @@ public sealed partial class World3DGridRenderingSystem
         var nearestDistance = maxDistance;
         var found = false;
 
-        var query = AllEntityQuery<TransformComponent, PhysicsComponent, FixturesComponent, SpriteComponent>();
+        var query = EntityManager.AllEntityQueryEnumerator<TransformComponent, PhysicsComponent, FixturesComponent, SpriteComponent>();
         while (query.MoveNext(out var uid, out var transform, out var body, out var fixtures, out var sprite))
         {
             if (uid == player ||
