@@ -1,6 +1,7 @@
 using System;
 using System.Numerics;
 using Robust.Shared.GameStates;
+using Robust.Shared.IoC;
 
 namespace Robust.Shared.GameObjects;
 
