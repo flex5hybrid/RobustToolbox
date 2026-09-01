@@ -233,6 +233,18 @@ public partial class EntityManager
     }
 
     /// <inheritdoc />
+    public NetCoordinates3D GetNetCoordinates(EntityCoordinates3D coordinates, MetaDataComponent? metadata = null)
+    {
+        return new NetCoordinates3D(GetNetEntity(coordinates.EntityId, metadata), coordinates.Position);
+    }
+
+    /// <inheritdoc />
+    public EntityCoordinates3D GetCoordinates(NetCoordinates3D coordinates)
+    {
+        return new EntityCoordinates3D(GetEntity(coordinates.NetEntity), coordinates.Position);
+    }
+
+    /// <inheritdoc />
     public virtual EntityCoordinates EnsureCoordinates<T>(NetCoordinates netCoordinates, EntityUid callerEntity)
     {
         // See EnsureEntity

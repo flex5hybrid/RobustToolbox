@@ -202,6 +202,16 @@ public partial interface IEntityManager
     public EntityCoordinates? GetCoordinates(NetCoordinates? coordinates);
 
     /// <summary>
+    /// Returns the network representation of authoritative three-dimensional entity coordinates.
+    /// </summary>
+    public NetCoordinates3D GetNetCoordinates(EntityCoordinates3D coordinates, MetaDataComponent? metadata = null);
+
+    /// <summary>
+    /// Returns local authoritative three-dimensional coordinates from their network representation.
+    /// </summary>
+    public EntityCoordinates3D GetCoordinates(NetCoordinates3D coordinates);
+
+    /// <summary>
     /// Tries to get a corresponding <see cref="EntityCoordinates"/> if it exists, otherwise creates an entity for it.
     /// </summary>
     /// <param name="netCoordinates">The net coordinates we're trying to resolve.</param>

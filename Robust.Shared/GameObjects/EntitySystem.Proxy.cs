@@ -1804,6 +1804,20 @@ public partial class EntitySystem
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     [ProxyFor(typeof(EntityManager))]
+    protected NetCoordinates3D GetNetCoordinates(EntityCoordinates3D coordinates, MetaDataComponent? metadata = null)
+    {
+        return EntityManager.GetNetCoordinates(coordinates, metadata);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    [ProxyFor(typeof(EntityManager))]
+    protected EntityCoordinates3D GetCoordinates(NetCoordinates3D coordinates)
+    {
+        return EntityManager.GetCoordinates(coordinates);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    [ProxyFor(typeof(EntityManager))]
     protected HashSet<EntityCoordinates> GetEntitySet(HashSet<NetCoordinates> netEntities)
     {
         return EntityManager.GetEntitySet(netEntities);

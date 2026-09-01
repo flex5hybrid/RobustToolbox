@@ -11,6 +11,8 @@
     <CefNativeVersion>147.0.10</CefNativeVersion>
   </PropertyGroup>
   <ItemGroup>
+    <PackageVersion Include="BepuPhysics" Version="2.4.0" />
+    <PackageVersion Include="BepuUtilities" Version="2.4.0" />
     <PackageVersion Include="BenchmarkDotNet" Version="0.15.8" />
     <PackageVersion Include="DiscordRichPresence" Version="1.2.1.24" />
     <PackageVersion Include="JetBrains.Annotations" Version="2025.2.4" />

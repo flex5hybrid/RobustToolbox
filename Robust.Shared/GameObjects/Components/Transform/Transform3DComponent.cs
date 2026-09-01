@@ -2,30 +2,43 @@ using System;
 using System.Numerics;
 using Robust.Shared.GameStates;
 using Robust.Shared.Serialization;
+using Robust.Shared.Serialization.Manager.Attributes;
 using Robust.Shared.ViewVariables;
 
 namespace Robust.Shared.GameObjects;
 
 /// <summary>
-/// Adds the spatial data that does not exist in the legacy 2D <see cref="TransformComponent"/>.
-/// During the 2D-to-3D transition, X/Y and the parent hierarchy remain authoritative in
-/// <see cref="TransformComponent"/>, while this component contributes local Z, 3D rotation and scale.
+/// Stores an entity's local three-dimensional transform.
+/// Entities can opt into authoritative 3D positioning independently, allowing the engine to migrate
+/// complete gameplay slices without silently projecting their simulation back into two dimensions.
 /// </summary>
 [RegisterComponent, NetworkedComponent]
 public sealed partial class Transform3DComponent : Component
 {
-    [ViewVariables]
-    internal float LocalZ;
+    /// <summary>
+    /// When true, <see cref="LocalPosition3D"/> and <see cref="LocalRotation3D"/> are the source of truth.
+    /// When false, X/Y and yaw are read from the legacy transform while this component only supplies
+    /// the missing Z, pitch, roll and scale during the migration.
+    /// </summary>
+    [DataField("authoritative"), ViewVariables]
+    internal bool Authoritative;
+
+    [DataField("position"), ViewVariables]
+    internal Vector3 LocalPosition3D;
 
     /// <summary>
-    /// Additional local 3D rotation. The existing 2D transform yaw remains authoritative until
-    /// the spatial simulation itself is migrated to 3D.
+    /// Local orientation. In compatibility mode the legacy yaw is composed with this value.
     /// </summary>
-    [ViewVariables]
+    [DataField("rotation"), ViewVariables]
     internal Quaternion LocalRotation3D = Quaternion.Identity;
 
-    [ViewVariables]
+    [DataField("scale"), ViewVariables]
     internal Vector3 LocalScale3D = Vector3.One;
+
+    public bool IsAuthoritative => Authoritative;
+    public Vector3 LocalPosition => LocalPosition3D;
+    public Quaternion LocalRotation => LocalRotation3D;
+    public Vector3 LocalScale => LocalScale3D;
 }
 
 /// <summary>
@@ -35,6 +48,9 @@ public sealed partial class Transform3DComponent : Component
 [Serializable, NetSerializable]
 public sealed class Transform3DComponentState : ComponentState
 {
+    public bool Authoritative;
+    public float X;
+    public float Y;
     public float Z;
     public float RotationX;
     public float RotationY;
