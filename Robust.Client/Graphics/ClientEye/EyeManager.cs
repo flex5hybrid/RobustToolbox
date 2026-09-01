@@ -83,13 +83,15 @@ namespace Robust.Client.Graphics
             var rotation = new Angle(CurrentEye.Rotation);
             var center = (bottomLeft + topRight) / 2;
 
-            var localTopRight = topRight - center;
-            var localBotLeft = bottomLeft - center;
+            var localTopRight = rotation.RotateVec(topRight - center);
+            var localBotLeft = rotation.RotateVec(bottomLeft - center);
 
-            localTopRight = rotation.RotateVec(localTopRight);
-            localBotLeft = rotation.RotateVec(localBotLeft);
-
-            var bounds = new Box2(localBotLeft, localTopRight).Translated(center);
+            // With arbitrary first-person yaw these two opposite corners can swap their X or Y
+            // ordering. Constructing Box2 directly would then throw "Left cannot be greater than Right".
+            // Normalize the pair before creating the axis-aligned local bounds.
+            var localMin = Vector2.Min(localBotLeft, localTopRight);
+            var localMax = Vector2.Max(localBotLeft, localTopRight);
+            var bounds = new Box2(localMin, localMax).Translated(center);
 
             return new Box2Rotated(bounds, -CurrentEye.Rotation, bounds.Center);
         }
