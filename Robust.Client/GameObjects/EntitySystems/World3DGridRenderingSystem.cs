@@ -142,7 +142,7 @@ public sealed partial class World3DGridRenderingSystem : EntitySystem
     }
 }
 
-internal sealed class World3DGridOverlay : Overlay
+internal sealed partial class World3DGridOverlay : Overlay
 {
     private const int FloatsPerVertex = 8;
     private const float FloorBottom = -0.12f;
@@ -286,6 +286,7 @@ internal sealed class World3DGridOverlay : Overlay
 
         _vertices.Clear();
         _tileVertices.Clear();
+        ClearSpriteBatches();
 
         // X/Y still follow the authoritative SS14 eye/transform. Base Z now comes from the real
         // Transform3D hierarchy, so the camera automatically follows a grid/deck when it receives height.
@@ -312,6 +313,12 @@ internal sealed class World3DGridOverlay : Overlay
             MathF.Sin(_firstPersonPitch));
         var target = camera + lookDirection;
 
+        var billboardForward = new Vector2(lookDirection.X, lookDirection.Y);
+        if (billboardForward.LengthSquared() < 1e-6f)
+            billboardForward = -forward2;
+        billboardForward = Vector2.Normalize(billboardForward);
+        var billboardRight = new Vector2(-billboardForward.Y, billboardForward.X);
+
         // Legacy SS14 still stores separate floors in separate MapIds. Content can now provide a set
         // of those maps that represent one 3D space, and the renderer composes all of them into this pass.
         var gridCount = 0;
@@ -327,6 +334,9 @@ internal sealed class World3DGridOverlay : Overlay
                 AppendMap(
                     mapId,
                     eyeWorld,
+                    eye.Rotation,
+                    billboardRight,
+                    billboardForward,
                     ref gridCount,
                     ref staticEntityCount,
                     ref movingEntityCount,
@@ -340,6 +350,9 @@ internal sealed class World3DGridOverlay : Overlay
             AppendMap(
                 args.MapId,
                 eyeWorld,
+                eye.Rotation,
+                billboardRight,
+                billboardForward,
                 ref gridCount,
                 ref staticEntityCount,
                 ref movingEntityCount,
@@ -353,7 +366,7 @@ internal sealed class World3DGridOverlay : Overlay
             System.Console.WriteLine(
                 $"[SS14-3D] map={args.MapId}; maps={mapCount}; eye={eyeWorld.X:F1},{eyeWorld.Y:F1},{cameraBase.Z:F1}; grids={gridCount}; " +
                 $"static={staticEntityCount}; moving={movingEntityCount}; characters={characterCount}; " +
-                $"camera=first-person; vertices={totalVertexCount}; textured={_tileVertices.Count / FloatsPerVertex}");
+                $"camera=first-person; vertices={totalVertexCount}; textured={_tileVertices.Count / FloatsPerVertex}; spriteVertices={GetSpriteVertexCount()}");
             _reportedGeometry = true;
         }
 
@@ -387,6 +400,9 @@ internal sealed class World3DGridOverlay : Overlay
         var tileVertexData = _diagnosticStage == DiagnosticStage.Tiles
             ? _tileVertices.ToArray()
             : Array.Empty<float>();
+        var spriteBatches = _diagnosticStage == DiagnosticStage.Tiles
+            ? SnapshotSpriteBatches()
+            : Array.Empty<SpriteBatch>();
         var tileAtlasHandle = GetTileAtlasHandle();
 
         renderHandle.RenderInRenderTarget(
@@ -395,6 +411,7 @@ internal sealed class World3DGridOverlay : Overlay
                 viewportSize,
                 solidVertexData,
                 tileVertexData,
+                spriteBatches,
                 tileAtlasHandle,
                 mvp,
                 _diagnosticStage),
@@ -405,6 +422,7 @@ internal sealed class World3DGridOverlay : Overlay
         Vector2i viewportSize,
         float[] solidVertexData,
         float[] tileVertexData,
+        SpriteBatch[] spriteBatches,
         uint tileAtlasHandle,
         Matrix4x4 mvp,
         DiagnosticStage stage)
@@ -480,6 +498,8 @@ internal sealed class World3DGridOverlay : Overlay
                 DrawVertexData(tileVertexData, true, tileAtlasHandle);
             else
                 DrawVertexData(tileVertexData, false, 0);
+
+            DrawSpriteBatches(spriteBatches);
 
             if (stage == DiagnosticStage.Tiles && _localPlayer is not null)
             {
@@ -620,6 +640,9 @@ internal sealed class World3DGridOverlay : Overlay
     private void AppendMap(
         MapId mapId,
         Vector2 eyeWorld,
+        Angle eyeRotation,
+        Vector2 billboardRight,
+        Vector2 billboardForward,
         ref int gridCount,
         ref int staticEntityCount,
         ref int movingEntityCount,
@@ -637,6 +660,9 @@ internal sealed class World3DGridOverlay : Overlay
         AppendEntities(
             mapId,
             eyeWorld,
+            eyeRotation,
+            billboardRight,
+            billboardForward,
             out var mapStaticCount,
             out var mapMovingCount,
             out var mapCharacterCount);
@@ -704,6 +730,9 @@ internal sealed class World3DGridOverlay : Overlay
     private void AppendEntities(
         MapId mapId,
         Vector2 eyeWorld,
+        Angle eyeRotation,
+        Vector2 billboardRight,
+        Vector2 billboardForward,
         out int staticEntityCount,
         out int movingEntityCount,
         out int characterCount)
@@ -770,7 +799,16 @@ internal sealed class World3DGridOverlay : Overlay
             if (body.BodyType != BodyType.Static)
             {
                 movingEntityCount++;
-                AddBox(bounds, baseZ + 0.02f, baseZ + ObjectHeight * 0.72f, EntityColor(uid, true) * 0.84f);
+                if (!TryAppendSpriteBillboard(
+                        sprite,
+                        worldRotation,
+                        eyeRotation,
+                        worldPosition3D,
+                        billboardRight,
+                        billboardForward))
+                {
+                    AddBox(bounds, baseZ + 0.02f, baseZ + ObjectHeight * 0.72f, EntityColor(uid, true) * 0.84f);
+                }
                 continue;
             }
 
