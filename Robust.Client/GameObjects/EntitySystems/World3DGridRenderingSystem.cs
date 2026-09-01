@@ -3,9 +3,14 @@ using System.Collections.Generic;
 using System.Numerics;
 using OpenToolkit.Graphics.OpenGL4;
 using Robust.Client.Graphics;
+using Robust.Client.Graphics.Clyde;
+using Robust.Client.Input;
+using Robust.Client.Map;
+using Robust.Client.Player;
 using Robust.Shared.Enums;
 using Robust.Shared.GameObjects;
 using Robust.Shared.IoC;
+using Robust.Shared.Input;
 using Robust.Shared.Map;
 using Robust.Shared.Map.Components;
 using Robust.Shared.Maths;
@@ -19,18 +24,65 @@ namespace Robust.Client.GameObjects;
 /// The simulation, networking, eye and map grids are all the normal Robust ECS objects;
 /// only the final world presentation is replaced by a perspective OpenGL pass.
 /// </summary>
-internal sealed class World3DGridRenderingSystem : EntitySystem
+internal sealed partial class World3DGridRenderingSystem : EntitySystem
 {
     [Dependency] private IOverlayManager _overlayManager = default!;
     [Dependency] private TransformSystem _transformSystem = default!;
     [Dependency] private SharedMapSystem _mapSystem = default!;
+    [Dependency] private IClydeTileDefinitionManager _tileDefinitionManager = default!;
+    [Dependency] private IClydeInternal _clyde = default!;
+    [Dependency] private IInputManager _inputManager = default!;
+    [Dependency] private IPlayerManager _playerManager = default!;
 
     private World3DGridOverlay? _overlay;
+    private EntityUid? _jumpEntity;
+    private float _jumpHeight;
+    private float _jumpVelocity;
+    private bool _jumpHeld;
 
     public override void Initialize()
     {
-        _overlay = new World3DGridOverlay(EntityManager, _transformSystem, _mapSystem);
+        _overlay = new World3DGridOverlay(
+            EntityManager,
+            _transformSystem,
+            _mapSystem,
+            _tileDefinitionManager,
+            _clyde);
         _overlayManager.AddOverlay(_overlay);
+    }
+
+    public override void FrameUpdate(float frameTime)
+    {
+        base.FrameUpdate(frameTime);
+
+        var localEntity = _playerManager.LocalEntity;
+        if (localEntity != _jumpEntity)
+        {
+            _jumpEntity = localEntity;
+            _jumpHeight = 0f;
+            _jumpVelocity = 0f;
+            _jumpHeld = false;
+        }
+
+        var jumpDown = _inputManager.IsKeyDown(Keyboard.Key.Space);
+        if (localEntity is { Valid: true } && jumpDown && !_jumpHeld && _jumpHeight <= 0.001f)
+            _jumpVelocity = 5.2f;
+
+        _jumpHeld = jumpDown;
+
+        if (_jumpHeight > 0f || _jumpVelocity > 0f)
+        {
+            var delta = Math.Clamp(frameTime, 0f, 0.1f);
+            _jumpVelocity -= 14.5f * delta;
+            _jumpHeight += _jumpVelocity * delta;
+            if (_jumpHeight <= 0f)
+            {
+                _jumpHeight = 0f;
+                _jumpVelocity = 0f;
+            }
+        }
+
+        _overlay?.SetLocalPlayerPresentation(localEntity, _jumpHeight);
     }
 
     public override void Shutdown()
@@ -46,7 +98,7 @@ internal sealed class World3DGridRenderingSystem : EntitySystem
 
 internal sealed class World3DGridOverlay : Overlay
 {
-    private const int FloatsPerVertex = 6;
+    private const int FloatsPerVertex = 8;
     private const float FloorBottom = -0.12f;
     private const float RenderRadius = 28f;
     private const float WallHeight = 2.6f;
@@ -57,12 +109,15 @@ internal sealed class World3DGridOverlay : Overlay
         #version 330 core
         layout(location = 0) in vec3 aPosition;
         layout(location = 1) in vec3 aColor;
+        layout(location = 2) in vec2 aUv;
         uniform mat4 uMvp;
         uniform int uClipSpace;
         out vec3 vColor;
+        out vec2 vUv;
         void main()
         {
             vColor = aColor;
+            vUv = aUv;
             gl_Position = uClipSpace != 0
                 ? vec4(aPosition, 1.0)
                 : uMvp * vec4(aPosition, 1.0);
@@ -72,27 +127,47 @@ internal sealed class World3DGridOverlay : Overlay
     private const string FragmentShaderSource = """
         #version 330 core
         in vec3 vColor;
+        in vec2 vUv;
+        uniform sampler2D uTexture;
+        uniform int uUseTexture;
         out vec4 fragColor;
         void main()
         {
-            fragColor = vec4(vColor, 1.0);
+            if (uUseTexture != 0)
+            {
+                vec4 sampleColor = texture(uTexture, vUv);
+                if (sampleColor.a < 0.08)
+                    discard;
+                fragColor = vec4(vColor * sampleColor.rgb, 1.0);
+            }
+            else
+            {
+                fragColor = vec4(vColor, 1.0);
+            }
         }
         """;
 
     private readonly IEntityManager _entityManager;
     private readonly SharedTransformSystem _transformSystem;
     private readonly SharedMapSystem _mapSystem;
+    private readonly IClydeTileDefinitionManager _tileDefinitionManager;
+    private readonly IClydeInternal _clyde;
     private readonly List<float> _vertices = new(256 * 1024);
+    private readonly List<float> _tileVertices = new(256 * 1024);
 
     private uint _vertexArray;
     private uint _vertexBuffer;
     private uint _program;
     private int _mvpLocation = -1;
     private int _clipSpaceLocation = -1;
+    private int _textureLocation = -1;
+    private int _useTextureLocation = -1;
     private bool _reportedGeometry;
     private bool _reportedRenderTarget;
     private bool _reportedMatrix;
     private bool _initialized;
+    private EntityUid? _localPlayer;
+    private float _localJumpHeight;
 
     private readonly DiagnosticStage _diagnosticStage;
 
@@ -102,15 +177,25 @@ internal sealed class World3DGridOverlay : Overlay
     public World3DGridOverlay(
         IEntityManager entityManager,
         SharedTransformSystem transformSystem,
-        SharedMapSystem mapSystem)
+        SharedMapSystem mapSystem,
+        IClydeTileDefinitionManager tileDefinitionManager,
+        IClydeInternal clyde)
     {
         _entityManager = entityManager;
         _transformSystem = transformSystem;
         _mapSystem = mapSystem;
+        _tileDefinitionManager = tileDefinitionManager;
+        _clyde = clyde;
         _diagnosticStage = ParseDiagnosticStage(Environment.GetEnvironmentVariable("SS14_3D_DIAGNOSTIC"));
         ZIndex = int.MaxValue;
 
         System.Console.WriteLine($"[SS14-3D] render stage: {_diagnosticStage}");
+    }
+
+    public void SetLocalPlayerPresentation(EntityUid? localPlayer, float jumpHeight)
+    {
+        _localPlayer = localPlayer;
+        _localJumpHeight = MathF.Max(0f, jumpHeight);
     }
 
     protected internal override bool BeforeDraw(in OverlayDrawArgs args)
@@ -125,11 +210,19 @@ internal sealed class World3DGridOverlay : Overlay
             return;
 
         _vertices.Clear();
+        _tileVertices.Clear();
+
+        var eyeWorld = eye.Position.Position + eye.Offset;
+        var target = new Vector3(eyeWorld.X, eyeWorld.Y, 0.55f + _localJumpHeight * 0.35f);
+        var forward2 = eye.Rotation.ToWorldVec();
+
+        // Eye angle zero means south in SS14 while MoveUp is north. Putting the camera on the
+        // eye-forward side makes north project towards the top of the screen and keeps WASD intuitive.
+        var camera = target + new Vector3(forward2.X * 9f, forward2.Y * 9f, 7f);
 
         // Do not use the legacy 2D viewport bounds to decide what exists in our perspective view.
         // Enumerate the actual live grids on the eye's map, then select chunks in grid-local space
         // around the real IEye position.
-        var eyeWorld = eye.Position.Position + eye.Offset;
         var gridCount = 0;
         foreach (var grid in _mapSystem.GetAllGrids(args.MapId))
         {
@@ -140,25 +233,25 @@ internal sealed class World3DGridOverlay : Overlay
         AppendEntities(
             args.MapId,
             eyeWorld,
+            new Vector2(camera.X, camera.Y),
             out var staticEntityCount,
             out var movingEntityCount,
-            out var characterCount);
+            out var characterCount,
+            out var cutAwayWallCount);
 
-        if (!_reportedGeometry && _vertices.Count > 0)
+        var totalVertexCount = (_vertices.Count + _tileVertices.Count) / FloatsPerVertex;
+        if (!_reportedGeometry && totalVertexCount > 0)
         {
             System.Console.WriteLine(
                 $"[SS14-3D] map={args.MapId}; eye={eyeWorld.X:F1},{eyeWorld.Y:F1}; grids={gridCount}; " +
                 $"static={staticEntityCount}; moving={movingEntityCount}; characters={characterCount}; " +
-                $"vertices={_vertices.Count / FloatsPerVertex}");
+                $"cutaway={cutAwayWallCount}; vertices={totalVertexCount}; textured={_tileVertices.Count / FloatsPerVertex}");
             _reportedGeometry = true;
         }
 
-        if (_diagnosticStage == DiagnosticStage.Tiles && _vertices.Count == 0)
+        if (_diagnosticStage == DiagnosticStage.Tiles && totalVertexCount == 0)
             return;
 
-        var target = new Vector3(eyeWorld.X, eyeWorld.Y, 0f);
-        var forward2 = eye.Rotation.ToWorldVec();
-        var camera = target + new Vector3(-forward2.X * 9f, -forward2.Y * 9f, 7f);
         var view = Matrix4x4.CreateLookAt(camera, target, Vector3.UnitZ);
         var projection = Matrix4x4.CreatePerspectiveFieldOfView(
             MathF.PI / 3f,
@@ -182,17 +275,29 @@ internal sealed class World3DGridOverlay : Overlay
         var renderTarget = args.Viewport.RenderTarget;
         var renderHandle = args.RenderHandle;
         var viewportSize = args.Viewport.Size;
-        var vertexData = GetStageVertices(eyeWorld);
+        var solidVertexData = GetStageVertices(eyeWorld);
+        var tileVertexData = _diagnosticStage == DiagnosticStage.Tiles
+            ? _tileVertices.ToArray()
+            : Array.Empty<float>();
+        var tileAtlasHandle = GetTileAtlasHandle();
 
         renderHandle.RenderInRenderTarget(
             renderTarget,
-            () => DrawPerspectivePass(viewportSize, vertexData, mvp, _diagnosticStage),
+            () => DrawPerspectivePass(
+                viewportSize,
+                solidVertexData,
+                tileVertexData,
+                tileAtlasHandle,
+                mvp,
+                _diagnosticStage),
             null);
     }
 
     private unsafe void DrawPerspectivePass(
         Vector2i viewportSize,
-        float[] vertexData,
+        float[] solidVertexData,
+        float[] tileVertexData,
+        uint tileAtlasHandle,
         Matrix4x4 mvp,
         DiagnosticStage stage)
     {
@@ -206,6 +311,9 @@ internal sealed class World3DGridOverlay : Overlay
         var previousScissorTest = GL.IsEnabled(EnableCap.ScissorTest);
         var previousStencilTest = GL.IsEnabled(EnableCap.StencilTest);
         var previousBlend = GL.IsEnabled(EnableCap.Blend);
+        GL.GetInteger(GetPName.ActiveTexture, out var previousActiveTexture);
+        GL.ActiveTexture(TextureUnit.Texture0);
+        GL.GetInteger(GetPName.TextureBinding2D, out var previousTexture0);
 
         try
         {
@@ -255,22 +363,21 @@ internal sealed class World3DGridOverlay : Overlay
             GL.UseProgram(_program);
             GL.UniformMatrix4(_mvpLocation, 1, false, (float*) &mvp);
             GL.Uniform1(_clipSpaceLocation, stage == DiagnosticStage.ClipTriangle ? 1 : 0);
+            GL.Uniform1(_textureLocation, 0);
             GL.BindVertexArray(_vertexArray);
             GL.BindBuffer(BufferTarget.ArrayBuffer, _vertexBuffer);
 
-            fixed (float* vertexPointer = vertexData)
-            {
-                GL.BufferData(
-                    BufferTarget.ArrayBuffer,
-                    vertexData.Length * sizeof(float),
-                    (IntPtr) vertexPointer,
-                    BufferUsageHint.StreamDraw);
-            }
-
-            GL.DrawArrays(PrimitiveType.Triangles, 0, vertexData.Length / FloatsPerVertex);
+            DrawVertexData(solidVertexData, false, 0);
+            if (tileAtlasHandle != 0)
+                DrawVertexData(tileVertexData, true, tileAtlasHandle);
+            else
+                DrawVertexData(tileVertexData, false, 0);
         }
         finally
         {
+            GL.ActiveTexture(TextureUnit.Texture0);
+            GL.BindTexture(TextureTarget.Texture2D, (uint) previousTexture0);
+            GL.ActiveTexture((TextureUnit) previousActiveTexture);
             GL.BindBuffer(BufferTarget.ArrayBuffer, (uint) previousArrayBuffer);
             GL.BindVertexArray((uint) previousVertexArray);
             GL.UseProgram((uint) previousProgram);
@@ -304,6 +411,41 @@ internal sealed class World3DGridOverlay : Overlay
         }
     }
 
+    private unsafe void DrawVertexData(float[] vertexData, bool textured, uint textureHandle)
+    {
+        if (vertexData.Length == 0)
+            return;
+
+        GL.Uniform1(_useTextureLocation, textured ? 1 : 0);
+        if (textured)
+            GL.BindTexture(TextureTarget.Texture2D, textureHandle);
+
+        fixed (float* vertexPointer = vertexData)
+        {
+            GL.BufferData(
+                BufferTarget.ArrayBuffer,
+                vertexData.Length * sizeof(float),
+                (IntPtr) vertexPointer,
+                BufferUsageHint.StreamDraw);
+        }
+
+        GL.DrawArrays(PrimitiveType.Triangles, 0, vertexData.Length / FloatsPerVertex);
+    }
+
+    private uint GetTileAtlasHandle()
+    {
+        if (_tileDefinitionManager.TileTextureAtlas is not Clyde.ClydeTexture atlas)
+            return 0;
+
+        foreach (var (texture, loaded) in _clyde.GetLoadedTextures())
+        {
+            if (ReferenceEquals(texture, atlas))
+                return loaded.OpenGLObject.Handle;
+        }
+
+        return 0;
+    }
+
     private float[] GetStageVertices(Vector2 eyeWorld)
     {
         switch (_diagnosticStage)
@@ -313,9 +455,9 @@ internal sealed class World3DGridOverlay : Overlay
             case DiagnosticStage.ClipTriangle:
                 return
                 [
-                    -0.85f, -0.75f, 0f, 1f, 0.1f, 0.1f,
-                    0.85f, -0.75f, 0f, 0.1f, 1f, 0.1f,
-                    0f, 0.85f, 0f, 0.1f, 0.3f, 1f,
+                    -0.85f, -0.75f, 0f, 1f, 0.1f, 0.1f, 0f, 0f,
+                    0.85f, -0.75f, 0f, 0.1f, 1f, 0.1f, 0f, 0f,
+                    0f, 0.85f, 0f, 0.1f, 0.3f, 1f, 0f, 0f,
                 ];
             case DiagnosticStage.WorldQuad:
                 _vertices.Clear();
@@ -395,14 +537,13 @@ internal sealed class World3DGridOverlay : Overlay
                             MathF.Abs(localCenter.Y - eyeLocal.Y) > RenderRadius)
                             continue;
 
-                        var color = TileColor(tile.TypeId);
-
                         var p0 = Vector2.Transform(new Vector2(gridX, gridY), worldMatrix);
                         var p1 = Vector2.Transform(new Vector2(gridX + 1, gridY), worldMatrix);
                         var p2 = Vector2.Transform(new Vector2(gridX + 1, gridY + 1), worldMatrix);
                         var p3 = Vector2.Transform(new Vector2(gridX, gridY + 1), worldMatrix);
 
-                        AddQuad(p0, p1, p2, p3, 0f, color);
+                        var color = TileColor(tile.TypeId);
+                        AddTexturedTile(p0, p1, p2, p3, tile);
 
                         AddExposedSide(grid.Comp, new Vector2i(gridX, gridY - 1), p0, p1, color * 0.62f);
                         AddExposedSide(grid.Comp, new Vector2i(gridX + 1, gridY), p1, p2, color * 0.70f);
@@ -417,13 +558,16 @@ internal sealed class World3DGridOverlay : Overlay
     private void AppendEntities(
         MapId mapId,
         Vector2 eyeWorld,
+        Vector2 cameraWorld,
         out int staticEntityCount,
         out int movingEntityCount,
-        out int characterCount)
+        out int characterCount,
+        out int cutAwayWallCount)
     {
         staticEntityCount = 0;
         movingEntityCount = 0;
         characterCount = 0;
+        cutAwayWallCount = 0;
 
         var query = _entityManager.AllEntityQueryEnumerator<
             TransformComponent,
@@ -473,7 +617,8 @@ internal sealed class World3DGridOverlay : Overlay
             if ((body.BodyType & BodyType.KinematicController) != 0)
             {
                 characterCount++;
-                AddCharacter(bounds, EntityColor(uid, true));
+                var jumpHeight = uid == _localPlayer ? _localJumpHeight : 0f;
+                AddCharacter(bounds, EntityColor(uid, true), jumpHeight);
                 continue;
             }
 
@@ -487,9 +632,16 @@ internal sealed class World3DGridOverlay : Overlay
             staticEntityCount++;
             if (_entityManager.TryGetComponent(uid, out OccluderComponent? occluder) && occluder.Enabled)
             {
+                var worldMatrix = _transformSystem.GetWorldMatrix(xform);
+                if (ShouldCutAwayOccluder(occluder.Polygon, worldMatrix, cameraWorld, eyeWorld))
+                {
+                    cutAwayWallCount++;
+                    continue;
+                }
+
                 AddPrism(
                     occluder.Polygon,
-                    _transformSystem.GetWorldMatrix(xform),
+                    worldMatrix,
                     0.01f,
                     WallHeight,
                     EntityColor(uid, false));
@@ -515,17 +667,80 @@ internal sealed class World3DGridOverlay : Overlay
         AddWallSide(p3, p0, bottom, top, color * 0.72f);
     }
 
-    private void AddCharacter(Box2 bounds, Vector3 color)
+    private void AddCharacter(Box2 bounds, Vector3 color, float verticalOffset)
     {
         var radius = Math.Clamp(MathF.Max(bounds.Width, bounds.Height) * 0.48f, 0.22f, 0.46f);
-        AddCylinder(bounds.Center, radius, 0.02f, CharacterHeight * 0.72f, color, 8);
+        AddCylinder(
+            bounds.Center,
+            radius,
+            0.02f + verticalOffset,
+            CharacterHeight * 0.72f + verticalOffset,
+            color,
+            8);
         AddCylinder(
             bounds.Center,
             radius * 0.72f,
-            CharacterHeight * 0.72f,
-            CharacterHeight,
+            CharacterHeight * 0.72f + verticalOffset,
+            CharacterHeight + verticalOffset,
             Lighten(color, 1.12f),
             8);
+    }
+
+    private static bool ShouldCutAwayOccluder(
+        ReadOnlySpan<Vector2> localPolygon,
+        Matrix3x2 worldMatrix,
+        Vector2 camera,
+        Vector2 target)
+    {
+        if (localPolygon.Length < 3)
+            return false;
+
+        var first = Vector2.Transform(localPolygon[0], worldMatrix);
+        var min = first;
+        var max = first;
+        for (var i = 1; i < localPolygon.Length; i++)
+        {
+            var point = Vector2.Transform(localPolygon[i], worldMatrix);
+            min = Vector2.Min(min, point);
+            max = Vector2.Max(max, point);
+        }
+
+        var bounds = new Box2(min, max).Enlarged(0.28f);
+        return SegmentIntersectsBox(
+            Vector2.Lerp(camera, target, 0.08f),
+            Vector2.Lerp(camera, target, 0.90f),
+            bounds);
+    }
+
+    private static bool SegmentIntersectsBox(Vector2 start, Vector2 end, Box2 bounds)
+    {
+        var direction = end - start;
+        var minimum = 0f;
+        var maximum = 1f;
+
+        return ClipAxis(start.X, direction.X, bounds.Left, bounds.Right, ref minimum, ref maximum) &&
+               ClipAxis(start.Y, direction.Y, bounds.Bottom, bounds.Top, ref minimum, ref maximum);
+    }
+
+    private static bool ClipAxis(
+        float origin,
+        float direction,
+        float minimumBound,
+        float maximumBound,
+        ref float minimum,
+        ref float maximum)
+    {
+        if (MathF.Abs(direction) < 0.00001f)
+            return origin >= minimumBound && origin <= maximumBound;
+
+        var first = (minimumBound - origin) / direction;
+        var second = (maximumBound - origin) / direction;
+        if (first > second)
+            (first, second) = (second, first);
+
+        minimum = MathF.Max(minimum, first);
+        maximum = MathF.Min(maximum, second);
+        return minimum <= maximum;
     }
 
     private void AddCylinder(
@@ -655,6 +870,99 @@ internal sealed class World3DGridOverlay : Overlay
             color);
     }
 
+    private void AddTexturedTile(
+        Vector2 p0,
+        Vector2 p1,
+        Vector2 p2,
+        Vector2 p3,
+        Tile tile)
+    {
+        var regions = _tileDefinitionManager.TileAtlasRegion(tile);
+        var region = regions is not null && tile.Variant < regions.Length
+            ? regions[tile.Variant]
+            : _tileDefinitionManager.ErrorTileRegion;
+
+        var rotationMirroring = _tileDefinitionManager.TryGetDefinition(tile.TypeId, out var definition) &&
+                                definition.AllowRotationMirror
+            ? tile.RotationMirroring
+            : 0;
+        GetTileUvs(region, rotationMirroring, out var uv0, out var uv1, out var uv2, out var uv3);
+
+        // The atlas is generated before the regular client begins rendering. Exposed floor sides retain
+        // their generated shading, while the top uses the source texture unchanged.
+        var color = Vector3.One;
+        AddTexturedTriangle(
+            new Vector3(p0, 0f),
+            new Vector3(p1, 0f),
+            new Vector3(p2, 0f),
+            uv0,
+            uv1,
+            uv2,
+            color);
+        AddTexturedTriangle(
+            new Vector3(p0, 0f),
+            new Vector3(p2, 0f),
+            new Vector3(p3, 0f),
+            uv0,
+            uv2,
+            uv3,
+            color);
+    }
+
+    private static void GetTileUvs(
+        Box2 region,
+        int rotationMirroring,
+        out Vector2 uv0,
+        out Vector2 uv1,
+        out Vector2 uv2,
+        out Vector2 uv3)
+    {
+        uv0 = new Vector2(region.Left, region.Bottom);
+        uv1 = new Vector2(region.Right, region.Bottom);
+        uv2 = new Vector2(region.Right, region.Top);
+        uv3 = new Vector2(region.Left, region.Top);
+
+        for (var rotation = 0; rotation < rotationMirroring % 4; rotation++)
+            (uv0, uv1, uv2, uv3) = (uv3, uv0, uv1, uv2);
+
+        if (rotationMirroring < 4)
+            return;
+
+        if (rotationMirroring % 2 == 0)
+        {
+            uv0.X = FlipUv(uv0.X, region.Left, region.Right);
+            uv1.X = FlipUv(uv1.X, region.Left, region.Right);
+            uv2.X = FlipUv(uv2.X, region.Left, region.Right);
+            uv3.X = FlipUv(uv3.X, region.Left, region.Right);
+        }
+        else
+        {
+            uv0.Y = FlipUv(uv0.Y, region.Bottom, region.Top);
+            uv1.Y = FlipUv(uv1.Y, region.Bottom, region.Top);
+            uv2.Y = FlipUv(uv2.Y, region.Bottom, region.Top);
+            uv3.Y = FlipUv(uv3.Y, region.Bottom, region.Top);
+        }
+    }
+
+    private static float FlipUv(float value, float minimum, float maximum)
+    {
+        return MathF.Abs(value - minimum) < 0.00001f ? maximum : minimum;
+    }
+
+    private void AddTexturedTriangle(
+        Vector3 a,
+        Vector3 b,
+        Vector3 c,
+        Vector2 uvA,
+        Vector2 uvB,
+        Vector2 uvC,
+        Vector3 color)
+    {
+        AddVertex(_tileVertices, a, color, uvA);
+        AddVertex(_tileVertices, b, color, uvB);
+        AddVertex(_tileVertices, c, color, uvC);
+    }
+
     private void AddTriangle(Vector3 a, Vector3 b, Vector3 c, Vector3 color)
     {
         AddVertex(a, color);
@@ -664,12 +972,19 @@ internal sealed class World3DGridOverlay : Overlay
 
     private void AddVertex(Vector3 position, Vector3 color)
     {
-        _vertices.Add(position.X);
-        _vertices.Add(position.Y);
-        _vertices.Add(position.Z);
-        _vertices.Add(color.X);
-        _vertices.Add(color.Y);
-        _vertices.Add(color.Z);
+        AddVertex(_vertices, position, color, Vector2.Zero);
+    }
+
+    private static void AddVertex(List<float> vertices, Vector3 position, Vector3 color, Vector2 uv)
+    {
+        vertices.Add(position.X);
+        vertices.Add(position.Y);
+        vertices.Add(position.Z);
+        vertices.Add(color.X);
+        vertices.Add(color.Y);
+        vertices.Add(color.Z);
+        vertices.Add(uv.X);
+        vertices.Add(uv.Y);
     }
 
     private static Vector3 TileColor(int typeId)
@@ -689,10 +1004,14 @@ internal sealed class World3DGridOverlay : Overlay
         _program = CreateProgram(VertexShaderSource, FragmentShaderSource);
         _mvpLocation = GL.GetUniformLocation((int) _program, "uMvp");
         _clipSpaceLocation = GL.GetUniformLocation((int) _program, "uClipSpace");
+        _textureLocation = GL.GetUniformLocation((int) _program, "uTexture");
+        _useTextureLocation = GL.GetUniformLocation((int) _program, "uUseTexture");
         if (_mvpLocation < 0)
             throw new InvalidOperationException("SS14 3D grid shader is missing uMvp.");
         if (_clipSpaceLocation < 0)
             throw new InvalidOperationException("SS14 3D grid shader is missing uClipSpace.");
+        if (_textureLocation < 0 || _useTextureLocation < 0)
+            throw new InvalidOperationException("SS14 3D grid shader is missing texture uniforms.");
 
         GL.GenVertexArrays(1, out _vertexArray);
         GL.GenBuffers(1, out _vertexBuffer);
@@ -704,6 +1023,8 @@ internal sealed class World3DGridOverlay : Overlay
         GL.EnableVertexAttribArray(0);
         GL.VertexAttribPointer(1, 3, VertexAttribPointerType.Float, false, stride, 3 * sizeof(float));
         GL.EnableVertexAttribArray(1);
+        GL.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, stride, 6 * sizeof(float));
+        GL.EnableVertexAttribArray(2);
         GL.BindVertexArray(0);
 
         _initialized = true;
