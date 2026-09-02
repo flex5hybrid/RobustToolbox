@@ -31,8 +31,11 @@ public sealed class SharedPhysics3DSystem : EntitySystem
 
     private readonly Dictionary<MapId, PhysicsWorld3D> _worlds = new();
     private readonly Dictionary<EntityUid, BodyRegistration> _registrations = new();
+    private readonly Dictionary<EntityUid, JointRegistration> _jointRegistrations = new();
     private readonly HashSet<EntityUid> _pending = new();
+    private readonly HashSet<EntityUid> _pendingJoints = new();
     private readonly List<EntityUid> _movedBetweenMaps = new();
+    private readonly List<EntityUid> _affectedJoints = new();
     private float _accumulator;
 
     public override void Initialize()
@@ -43,6 +46,8 @@ public sealed class SharedPhysics3DSystem : EntitySystem
         SubscribeLocalEvent<PhysicsBody3DComponent, ComponentShutdown>(OnBodyShutdown);
         SubscribeLocalEvent<Collider3DComponent, ComponentStartup>(OnColliderStartup);
         SubscribeLocalEvent<Collider3DComponent, ComponentShutdown>(OnColliderShutdown);
+        SubscribeLocalEvent<PhysicsJoint3DComponent, ComponentStartup>(OnJointStartup);
+        SubscribeLocalEvent<PhysicsJoint3DComponent, ComponentShutdown>(OnJointShutdown);
         SubscribeLocalEvent<MapRemovedEvent>(OnMapRemoved);
     }
 
@@ -55,6 +60,8 @@ public sealed class SharedPhysics3DSystem : EntitySystem
 
         RefreshCrossMapBodies();
         FlushPending();
+        RefreshJoints();
+        FlushPendingJoints();
 
         _accumulator += Math.Clamp(frameTime, 0f, FixedTimeStep * MaximumCatchUpSteps);
         var steps = 0;
@@ -85,8 +92,11 @@ public sealed class SharedPhysics3DSystem : EntitySystem
 
         _worlds.Clear();
         _registrations.Clear();
+        _jointRegistrations.Clear();
         _pending.Clear();
+        _pendingJoints.Clear();
         _movedBetweenMaps.Clear();
+        _affectedJoints.Clear();
         _accumulator = 0f;
         base.Shutdown();
     }
@@ -98,6 +108,15 @@ public sealed class SharedPhysics3DSystem : EntitySystem
 
         RemoveBody(uid);
         _pending.Add(uid);
+    }
+
+    public void RefreshJoint(EntityUid uid)
+    {
+        if (!_network.IsServer)
+            return;
+
+        RemoveJoint(uid);
+        _pendingJoints.Add(uid);
     }
 
     public bool TryGetBodyPose(EntityUid uid, out Vector3 position, out Quaternion rotation)
@@ -569,6 +588,17 @@ public sealed class SharedPhysics3DSystem : EntitySystem
         RemoveBody(entity.Owner);
     }
 
+    private void OnJointStartup(Entity<PhysicsJoint3DComponent> entity, ref ComponentStartup args)
+    {
+        if (_network.IsServer)
+            _pendingJoints.Add(entity.Owner);
+    }
+
+    private void OnJointShutdown(Entity<PhysicsJoint3DComponent> entity, ref ComponentShutdown args)
+    {
+        RemoveJoint(entity.Owner);
+    }
+
     private void OnMapRemoved(MapRemovedEvent args)
     {
         if (!_worlds.Remove(args.MapId, out var world))
@@ -593,6 +623,25 @@ public sealed class SharedPhysics3DSystem : EntitySystem
 
         world.Dispose();
         _movedBetweenMaps.Clear();
+
+        _affectedJoints.Clear();
+        foreach (var (jointUid, registration) in _jointRegistrations)
+        {
+            if (registration.MapId == args.MapId)
+                _affectedJoints.Add(jointUid);
+        }
+
+        foreach (var jointUid in _affectedJoints)
+        {
+            _jointRegistrations.Remove(jointUid);
+            if (TryComp(jointUid, out PhysicsJoint3DComponent? joint))
+            {
+                joint.BackendHandle = -1;
+                _pendingJoints.Add(jointUid);
+            }
+        }
+
+        _affectedJoints.Clear();
     }
 
     private void RefreshCrossMapBodies()
@@ -619,6 +668,153 @@ public sealed class SharedPhysics3DSystem : EntitySystem
             TryCreateBody(uid);
 
         _pending.Clear();
+    }
+
+    private void RefreshJoints()
+    {
+        _affectedJoints.Clear();
+        foreach (var (uid, registration) in _jointRegistrations)
+        {
+            if (!TryComp(uid, out PhysicsJoint3DComponent? joint) ||
+                !joint.Enabled ||
+                !_registrations.TryGetValue(joint.BodyA, out var bodyA) ||
+                !_registrations.TryGetValue(joint.BodyB, out var bodyB) ||
+                bodyA.MapId != registration.MapId ||
+                bodyB.MapId != registration.MapId)
+            {
+                _affectedJoints.Add(uid);
+            }
+        }
+
+        foreach (var uid in _affectedJoints)
+            RefreshJoint(uid);
+
+        _affectedJoints.Clear();
+    }
+
+    private void FlushPendingJoints()
+    {
+        if (_pendingJoints.Count == 0)
+            return;
+
+        _affectedJoints.Clear();
+        foreach (var uid in _pendingJoints)
+        {
+            if (!TryCreateJoint(uid) &&
+                TryComp(uid, out PhysicsJoint3DComponent? joint) &&
+                joint.Enabled &&
+                (!_registrations.ContainsKey(joint.BodyA) || !_registrations.ContainsKey(joint.BodyB)))
+            {
+                _affectedJoints.Add(uid);
+            }
+        }
+
+        _pendingJoints.Clear();
+        foreach (var uid in _affectedJoints)
+            _pendingJoints.Add(uid);
+        _affectedJoints.Clear();
+    }
+
+    private bool TryCreateJoint(EntityUid uid)
+    {
+        if (_jointRegistrations.ContainsKey(uid) ||
+            !TryComp(uid, out PhysicsJoint3DComponent? joint) ||
+            !joint.Enabled ||
+            joint.BodyA == joint.BodyB ||
+            !_registrations.TryGetValue(joint.BodyA, out var bodyA) ||
+            !_registrations.TryGetValue(joint.BodyB, out var bodyB) ||
+            bodyA.IsStatic ||
+            bodyB.IsStatic ||
+            bodyA.MapId != bodyB.MapId ||
+            !_worlds.TryGetValue(bodyA.MapId, out var world) ||
+            !IsValidJoint(joint))
+        {
+            return false;
+        }
+
+        var spring = new SpringSettings(joint.SpringFrequency, joint.DampingRatio);
+        ConstraintHandle handle;
+        switch (joint.JointType)
+        {
+            case PhysicsJointType3D.BallSocket:
+                handle = world.Simulation.Solver.Add(
+                    bodyA.BodyHandle,
+                    bodyB.BodyHandle,
+                    new BallSocket
+                    {
+                        LocalOffsetA = joint.LocalAnchorA,
+                        LocalOffsetB = joint.LocalAnchorB,
+                        SpringSettings = spring,
+                    });
+                break;
+            case PhysicsJointType3D.DistanceLimit:
+                handle = world.Simulation.Solver.Add(
+                    bodyA.BodyHandle,
+                    bodyB.BodyHandle,
+                    new DistanceLimit(
+                        joint.LocalAnchorA,
+                        joint.LocalAnchorB,
+                        joint.MinimumDistance,
+                        joint.MaximumDistance,
+                        spring));
+                break;
+            case PhysicsJointType3D.Hinge:
+                handle = world.Simulation.Solver.Add(
+                    bodyA.BodyHandle,
+                    bodyB.BodyHandle,
+                    new Hinge
+                    {
+                        LocalOffsetA = joint.LocalAnchorA,
+                        LocalOffsetB = joint.LocalAnchorB,
+                        LocalHingeAxisA = Vector3.Normalize(joint.LocalAxisA),
+                        LocalHingeAxisB = Vector3.Normalize(joint.LocalAxisB),
+                        SpringSettings = spring,
+                    });
+                break;
+            case PhysicsJointType3D.Weld:
+                handle = world.Simulation.Solver.Add(
+                    bodyA.BodyHandle,
+                    bodyB.BodyHandle,
+                    new Weld
+                    {
+                        LocalOffset = joint.LocalAnchorA,
+                        LocalOrientation = SpatialMath.Normalize(joint.LocalOrientation),
+                        SpringSettings = spring,
+                    });
+                break;
+            default:
+                return false;
+        }
+
+        var collisionDisabled = !joint.CollideConnected;
+        if (collisionDisabled)
+            world.PairFilters.Disable(bodyA.CollidablePacked, bodyB.CollidablePacked);
+
+        _jointRegistrations.Add(uid, new JointRegistration(
+            bodyA.MapId,
+            handle,
+            joint.BodyA,
+            joint.BodyB,
+            bodyA.CollidablePacked,
+            bodyB.CollidablePacked,
+            collisionDisabled));
+        joint.BackendHandle = handle.Value;
+        return true;
+    }
+
+    private void RemoveJoint(EntityUid uid)
+    {
+        _pendingJoints.Remove(uid);
+        if (_jointRegistrations.Remove(uid, out var registration) &&
+            _worlds.TryGetValue(registration.MapId, out var world))
+        {
+            if (registration.CollisionDisabled)
+                world.PairFilters.Enable(registration.CollidableA, registration.CollidableB);
+            world.Simulation.Solver.Remove(registration.Handle);
+        }
+
+        if (TryComp(uid, out PhysicsJoint3DComponent? joint))
+            joint.BackendHandle = -1;
     }
 
     private bool TryCreateBody(EntityUid uid)
@@ -1009,6 +1205,22 @@ public sealed class SharedPhysics3DSystem : EntitySystem
             return;
         }
 
+        _affectedJoints.Clear();
+        foreach (var (jointUid, jointRegistration) in _jointRegistrations)
+        {
+            if (jointRegistration.BodyA == uid || jointRegistration.BodyB == uid)
+                _affectedJoints.Add(jointUid);
+        }
+
+        foreach (var jointUid in _affectedJoints)
+        {
+            RemoveJoint(jointUid);
+            if (TryComp(jointUid, out PhysicsJoint3DComponent? joint) && joint.Enabled)
+                _pendingJoints.Add(jointUid);
+        }
+
+        _affectedJoints.Clear();
+
         world.CollisionProperties.Remove(registration.CollidablePacked);
         if (registration.IsStatic)
             world.Simulation.Statics.Remove(registration.StaticHandle);
@@ -1180,6 +1392,34 @@ public sealed class SharedPhysics3DSystem : EntitySystem
         return mode == ContinuousDetectionMode3D.Continuous ? 0.1f : float.MaxValue;
     }
 
+    private static bool IsValidJoint(PhysicsJoint3DComponent joint)
+    {
+        if (!SpatialMath.IsFinite(joint.LocalAnchorA) ||
+            !SpatialMath.IsFinite(joint.LocalAnchorB) ||
+            !SpatialMath.IsFinite(joint.LocalAxisA) ||
+            !SpatialMath.IsFinite(joint.LocalAxisB) ||
+            !SpatialMath.IsFinite(joint.LocalOrientation) ||
+            !float.IsFinite(joint.MinimumDistance) ||
+            !float.IsFinite(joint.MaximumDistance) ||
+            !float.IsFinite(joint.SpringFrequency) ||
+            !float.IsFinite(joint.DampingRatio) ||
+            joint.SpringFrequency <= 0f ||
+            joint.DampingRatio < 0f ||
+            joint.MinimumDistance < 0f ||
+            joint.MaximumDistance < joint.MinimumDistance)
+        {
+            return false;
+        }
+
+        return joint.JointType switch
+        {
+            PhysicsJointType3D.Hinge =>
+                joint.LocalAxisA.LengthSquared() >= 1e-8f && joint.LocalAxisB.LengthSquared() >= 1e-8f,
+            PhysicsJointType3D.Weld => joint.LocalOrientation.LengthSquared() >= 1e-8f,
+            _ => true,
+        };
+    }
+
     private static Vector2 MoveTowards(Vector2 current, Vector2 target, float maximumDelta)
     {
         var delta = target - current;
@@ -1197,6 +1437,7 @@ public sealed class SharedPhysics3DSystem : EntitySystem
         public readonly MapId MapId;
         public readonly Simulation Simulation;
         public readonly CollisionPropertiesRegistry CollisionProperties = new();
+        public readonly CollisionPairFilterRegistry PairFilters = new();
         public readonly BodyDynamicsRegistry Dynamics = new();
         public readonly ContactTracker3D Contacts;
 
@@ -1206,7 +1447,7 @@ public sealed class SharedPhysics3DSystem : EntitySystem
             Contacts = new ContactTracker3D(CollisionProperties);
             Simulation = Simulation.Create(
                 Pool,
-                new NarrowPhaseCallbacks3D(CollisionProperties, Contacts),
+                new NarrowPhaseCallbacks3D(CollisionProperties, PairFilters, Contacts),
                 new PoseIntegratorCallbacks3D(gravity, Dynamics),
                 new SolveDescription(8, 2));
             Simulation.Deterministic = true;
@@ -1296,6 +1537,35 @@ public sealed class SharedPhysics3DSystem : EntitySystem
         }
     }
 
+    private sealed class JointRegistration
+    {
+        public readonly MapId MapId;
+        public readonly ConstraintHandle Handle;
+        public readonly EntityUid BodyA;
+        public readonly EntityUid BodyB;
+        public readonly uint CollidableA;
+        public readonly uint CollidableB;
+        public readonly bool CollisionDisabled;
+
+        public JointRegistration(
+            MapId mapId,
+            ConstraintHandle handle,
+            EntityUid bodyA,
+            EntityUid bodyB,
+            uint collidableA,
+            uint collidableB,
+            bool collisionDisabled)
+        {
+            MapId = mapId;
+            Handle = handle;
+            BodyA = bodyA;
+            BodyB = bodyB;
+            CollidableA = collidableA;
+            CollidableB = collidableB;
+            CollisionDisabled = collisionDisabled;
+        }
+    }
+
     private readonly record struct ShapeCollisionProperties3D(
         int Layer,
         int Mask,
@@ -1375,6 +1645,42 @@ public sealed class SharedPhysics3DSystem : EntitySystem
         public void Remove(uint collidable)
         {
             _properties.Remove(collidable);
+        }
+    }
+
+    private sealed class CollisionPairFilterRegistry
+    {
+        private readonly Dictionary<ContactPairKey3D, int> _disabled = new();
+
+        public void Disable(uint first, uint second)
+        {
+            var key = CreateKey(first, second);
+            _disabled.TryGetValue(key, out var count);
+            _disabled[key] = count + 1;
+        }
+
+        public void Enable(uint first, uint second)
+        {
+            var key = CreateKey(first, second);
+            if (!_disabled.TryGetValue(key, out var count))
+                return;
+
+            if (count <= 1)
+                _disabled.Remove(key);
+            else
+                _disabled[key] = count - 1;
+        }
+
+        public bool IsDisabled(CollidableReference first, CollidableReference second)
+        {
+            return _disabled.ContainsKey(CreateKey(first.Packed, second.Packed));
+        }
+
+        private static ContactPairKey3D CreateKey(uint first, uint second)
+        {
+            return first <= second
+                ? new ContactPairKey3D(first, second)
+                : new ContactPairKey3D(second, first);
         }
     }
 
@@ -1750,11 +2056,16 @@ public sealed class SharedPhysics3DSystem : EntitySystem
     private struct NarrowPhaseCallbacks3D : INarrowPhaseCallbacks
     {
         private readonly CollisionPropertiesRegistry _properties;
+        private readonly CollisionPairFilterRegistry _pairFilters;
         private readonly ContactTracker3D _contacts;
 
-        public NarrowPhaseCallbacks3D(CollisionPropertiesRegistry properties, ContactTracker3D contacts)
+        public NarrowPhaseCallbacks3D(
+            CollisionPropertiesRegistry properties,
+            CollisionPairFilterRegistry pairFilters,
+            ContactTracker3D contacts)
         {
             _properties = properties;
+            _pairFilters = pairFilters;
             _contacts = contacts;
         }
 
@@ -1773,7 +2084,7 @@ public sealed class SharedPhysics3DSystem : EntitySystem
             if (first.Mobility != CollidableMobility.Dynamic && second.Mobility != CollidableMobility.Dynamic)
                 return false;
 
-            return IsCollisionEnabled(first, second);
+            return !_pairFilters.IsDisabled(first, second) && IsCollisionEnabled(first, second);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
