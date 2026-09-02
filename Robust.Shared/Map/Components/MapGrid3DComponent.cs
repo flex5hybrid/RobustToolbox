@@ -11,16 +11,29 @@ using Robust.Shared.ViewVariables;
 
 namespace Robust.Shared.Map.Components;
 
+[Flags]
+[Serializable, NetSerializable]
+public enum VoxelFlags3D : byte
+{
+    None = 0,
+    Solid = 1 << 0,
+    Opaque = 1 << 1,
+    Airtight = 1 << 2,
+    Conductive = 1 << 3,
+    Flammable = 1 << 4,
+    DefaultStructure = Solid | Opaque | Airtight,
+}
+
 [DataDefinition, Serializable, NetSerializable]
 public partial struct Voxel3D : IEquatable<Voxel3D>
 {
-    public static readonly Voxel3D Empty = new(0);
+    public static readonly Voxel3D Empty = default;
 
     [DataField]
     public int TypeId;
 
     [DataField]
-    public byte Flags;
+    public VoxelFlags3D Flags;
 
     [DataField]
     public byte Variant;
@@ -33,10 +46,14 @@ public partial struct Voxel3D : IEquatable<Voxel3D>
 
     public bool IsEmpty => TypeId == 0;
 
-    public Voxel3D(int typeId, byte flags = 0, byte variant = 0, byte orientation = 0)
+    public Voxel3D(
+        int typeId,
+        VoxelFlags3D flags = VoxelFlags3D.DefaultStructure,
+        byte variant = 0,
+        byte orientation = 0)
     {
         TypeId = typeId;
-        Flags = flags;
+        Flags = typeId == 0 ? VoxelFlags3D.None : flags;
         Variant = variant;
         Orientation = orientation;
     }
@@ -80,6 +97,9 @@ public sealed partial class MapGrid3DComponent : Component
     [DataField]
     public bool CanSplit = true;
 
+    [DataField]
+    public bool CollisionEnabled = true;
+
     [ViewVariables]
     public int ChunkCount => Chunks.Count;
 
@@ -100,12 +120,16 @@ internal sealed class MapGrid3DComponentState(
     int formatVersion,
     ushort chunkSize,
     float cellSize,
+    bool canSplit,
+    bool collisionEnabled,
     Dictionary<Vector3i, Voxel3D[]> chunks,
     GameTick lastModifiedTick) : ComponentState
 {
     public int FormatVersion = formatVersion;
     public ushort ChunkSize = chunkSize;
     public float CellSize = cellSize;
+    public bool CanSplit = canSplit;
+    public bool CollisionEnabled = collisionEnabled;
     public Dictionary<Vector3i, Voxel3D[]> Chunks = chunks;
     public GameTick LastModifiedTick = lastModifiedTick;
 }
@@ -115,6 +139,8 @@ internal sealed class MapGrid3DComponentDeltaState(
     int formatVersion,
     ushort chunkSize,
     float cellSize,
+    bool canSplit,
+    bool collisionEnabled,
     Dictionary<Vector3i, Voxel3D[]?>? chunks,
     GameTick lastModifiedTick)
     : ComponentState, IComponentDeltaState<MapGrid3DComponentState>
@@ -122,6 +148,8 @@ internal sealed class MapGrid3DComponentDeltaState(
     public readonly int FormatVersion = formatVersion;
     public readonly ushort ChunkSize = chunkSize;
     public readonly float CellSize = cellSize;
+    public readonly bool CanSplit = canSplit;
+    public readonly bool CollisionEnabled = collisionEnabled;
     public readonly Dictionary<Vector3i, Voxel3D[]?>? Chunks = chunks;
     public readonly GameTick LastModifiedTick = lastModifiedTick;
 
@@ -130,6 +158,8 @@ internal sealed class MapGrid3DComponentDeltaState(
         state.FormatVersion = FormatVersion;
         state.ChunkSize = ChunkSize;
         state.CellSize = CellSize;
+        state.CanSplit = CanSplit;
+        state.CollisionEnabled = CollisionEnabled;
         state.LastModifiedTick = LastModifiedTick;
         if (Chunks is null)
             return;
@@ -153,6 +183,8 @@ internal sealed class MapGrid3DComponentDeltaState(
             FormatVersion,
             ChunkSize,
             CellSize,
+            CanSplit,
+            CollisionEnabled,
             chunks,
             LastModifiedTick);
         ApplyToFullState(copy);

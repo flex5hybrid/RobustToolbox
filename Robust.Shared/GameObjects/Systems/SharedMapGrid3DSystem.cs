@@ -185,6 +185,8 @@ public sealed class SharedMapGrid3DSystem : EntitySystem
                 component.FormatVersion,
                 component.ChunkSize,
                 component.CellSize,
+                component.CanSplit,
+                component.CollisionEnabled,
                 CloneChunks(component.Chunks),
                 component.LastVoxelModifiedTick);
             return;
@@ -211,6 +213,8 @@ public sealed class SharedMapGrid3DSystem : EntitySystem
             component.FormatVersion,
             component.ChunkSize,
             component.CellSize,
+            component.CanSplit,
+            component.CollisionEnabled,
             changes,
             component.LastVoxelModifiedTick);
     }
@@ -225,6 +229,8 @@ public sealed class SharedMapGrid3DSystem : EntitySystem
                 component.FormatVersion = full.FormatVersion;
                 component.ChunkSize = full.ChunkSize;
                 component.CellSize = full.CellSize;
+                component.CanSplit = full.CanSplit;
+                component.CollisionEnabled = full.CollisionEnabled;
                 component.Chunks.Clear();
                 foreach (var (indices, data) in full.Chunks)
                 {
@@ -248,6 +254,8 @@ public sealed class SharedMapGrid3DSystem : EntitySystem
                 component.FormatVersion = delta.FormatVersion;
                 component.ChunkSize = delta.ChunkSize;
                 component.CellSize = delta.CellSize;
+                component.CanSplit = delta.CanSplit;
+                component.CollisionEnabled = delta.CollisionEnabled;
                 if (delta.Chunks is not null)
                 {
                     foreach (var (indices, data) in delta.Chunks)
