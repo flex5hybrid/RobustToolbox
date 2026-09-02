@@ -42,7 +42,6 @@ public sealed partial class World3DGridRenderingSystem
             return false;
         }
 
-        var eye = _raycastEyeManager.CurrentEye;
         var playerPosition = _transform3DSystem.GetWorldPosition3D(player, playerTransform);
         origin = playerPosition + new Vector3(
             0f,

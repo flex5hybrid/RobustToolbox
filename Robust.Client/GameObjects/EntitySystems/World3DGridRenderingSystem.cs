@@ -640,9 +640,90 @@ internal sealed partial class World3DGridOverlay : Overlay
             out var mapMovingCount,
             out var mapCharacterCount);
 
+        AppendNative3DEntities(mapId, eyeWorld, ref mapStaticCount, ref mapMovingCount);
+
         staticEntityCount += mapStaticCount;
         movingEntityCount += mapMovingCount;
         characterCount += mapCharacterCount;
+    }
+
+    private void AppendNative3DEntities(
+        MapId mapId,
+        Vector2 eyeWorld,
+        ref int staticEntityCount,
+        ref int movingEntityCount)
+    {
+        var query = _entityManager.AllEntityQueryEnumerator<
+            TransformComponent,
+            Transform3DComponent,
+            Primitive3DComponent>();
+
+        while (query.MoveNext(out var uid, out var transform, out var transform3D, out var primitive))
+        {
+            if (transform.MapID != mapId ||
+                !transform3D.Authoritative ||
+                !primitive.Visible ||
+                uid == _localPlayer ||
+                !SpatialMath.IsFinite(primitive.Size) ||
+                primitive.Size.X <= 0f ||
+                primitive.Size.Y <= 0f ||
+                primitive.Size.Z <= 0f)
+            {
+                continue;
+            }
+
+            var position = _transform3DSystem.GetWorldPosition3D(uid, transform);
+            if (MathF.Abs(position.X - eyeWorld.X) > RenderRadius ||
+                MathF.Abs(position.Y - eyeWorld.Y) > RenderRadius)
+            {
+                continue;
+            }
+
+            var color = new Vector3(primitive.Color.R, primitive.Color.G, primitive.Color.B);
+            AddOrientedBox(_transform3DSystem.GetWorldMatrix3D(uid, transform), primitive.Size, color);
+
+            if (_entityManager.TryGetComponent(uid, out PhysicsBody3DComponent? body) &&
+                body.BodyType != PhysicsBodyType3D.Static)
+            {
+                movingEntityCount++;
+            }
+            else
+            {
+                staticEntityCount++;
+            }
+        }
+    }
+
+    private void AddOrientedBox(Matrix4x4 worldMatrix, Vector3 size, Vector3 color)
+    {
+        var half = size * 0.5f;
+        Span<Vector3> corners = stackalloc Vector3[8]
+        {
+            new(-half.X, -half.Y, -half.Z),
+            new( half.X, -half.Y, -half.Z),
+            new( half.X,  half.Y, -half.Z),
+            new(-half.X,  half.Y, -half.Z),
+            new(-half.X, -half.Y,  half.Z),
+            new( half.X, -half.Y,  half.Z),
+            new( half.X,  half.Y,  half.Z),
+            new(-half.X,  half.Y,  half.Z),
+        };
+
+        for (var i = 0; i < corners.Length; i++)
+            corners[i] = Vector3.Transform(corners[i], worldMatrix);
+
+        AddFace(corners[0], corners[3], corners[2], corners[1], color * 0.48f);
+        AddFace(corners[4], corners[5], corners[6], corners[7], Lighten(color, 1.18f));
+        AddFace(corners[0], corners[1], corners[5], corners[4], color * 0.66f);
+        AddFace(corners[1], corners[2], corners[6], corners[5], color * 0.76f);
+        AddFace(corners[2], corners[3], corners[7], corners[6], color * 0.86f);
+        AddFace(corners[3], corners[0], corners[4], corners[7], color * 0.72f);
+    }
+
+    private void AddFace(Vector3 p0, Vector3 p1, Vector3 p2, Vector3 p3, Vector3 color)
+    {
+        AddTriangle(p0, p1, p2, color);
+        AddTriangle(p0, p2, p3, color);
     }
 
     private void AppendGrid(Entity<MapGridComponent> grid, Vector2 eyeWorld)
