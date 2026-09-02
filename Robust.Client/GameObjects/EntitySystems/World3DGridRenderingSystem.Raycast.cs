@@ -47,13 +47,12 @@ public sealed partial class World3DGridRenderingSystem
         origin = playerPosition + new Vector3(
             0f,
             0f,
-            RaycastEyeHeight + _jumpHeight + _cameraBob);
+            RaycastEyeHeight + _cameraBob);
 
-        var forward2 = eye.Rotation.ToWorldVec();
         var horizontalLook = MathF.Cos(_firstPersonPitch);
         direction = new Vector3(
-            -forward2.X * horizontalLook,
-            -forward2.Y * horizontalLook,
+            MathF.Sin(_firstPersonYaw) * horizontalLook,
+            MathF.Cos(_firstPersonYaw) * horizontalLook,
             MathF.Sin(_firstPersonPitch));
 
         var lengthSquared = direction.LengthSquared();

@@ -258,6 +258,29 @@ public sealed class SharedTransform3DSystem : EntitySystem
             _transform.SetLocalRotation(uid, GetYaw(rotation), transform);
     }
 
+    public void SetWorldRotation3D(EntityUid uid, Quaternion rotation, TransformComponent? transform = null)
+    {
+        if (!IsFinite(rotation) ||
+            rotation.LengthSquared() < 1e-8f ||
+            !_transformQuery.Resolve(uid, ref transform, false))
+        {
+            return;
+        }
+
+        rotation = Quaternion.Normalize(rotation);
+        if (!IsAuthoritative(uid))
+        {
+            _transform.SetWorldRotation(uid, GetYaw(rotation));
+            return;
+        }
+
+        var local = rotation;
+        if (transform.ParentUid.IsValid())
+            local = SpatialMath.RelativeTo(rotation, GetWorldRotation3D(transform.ParentUid));
+
+        SetRotation3D(uid, local);
+    }
+
     public Vector3 GetScale3D(EntityUid uid)
     {
         return GetLocalScale3D(uid);

@@ -4,7 +4,6 @@ using System.Numerics;
 using OpenToolkit.Graphics.OpenGL4;
 using Robust.Client.Graphics;
 using Robust.Client.Graphics.Clyde;
-using Robust.Client.Input;
 using Robust.Client.Map;
 using Robust.Client.Player;
 using Robust.Shared.Enums;
@@ -14,8 +13,7 @@ using Robust.Shared.Input;
 using Robust.Shared.Map;
 using Robust.Shared.Map.Components;
 using Robust.Shared.Maths;
-using Robust.Shared.Physics;
-using Robust.Shared.Physics.Components;
+using Robust.Shared.Physics3D;
 
 namespace Robust.Client.GameObjects;
 
@@ -34,16 +32,13 @@ public sealed partial class World3DGridRenderingSystem : EntitySystem
     [Dependency] private SharedMapSystem _mapSystem = default!;
     [Dependency] private IClydeTileDefinitionManager _tileDefinitionManager = default!;
     [Dependency] private IClydeInternal _clyde = default!;
-    [Dependency] private IInputManager _inputManager = default!;
     [Dependency] private IPlayerManager _playerManager = default!;
 
     private World3DGridOverlay? _overlay;
-    private EntityUid? _jumpEntity;
-    private float _jumpHeight;
-    private float _jumpVelocity;
-    private bool _jumpHeld;
+    private EntityUid? _presentationEntity;
     private float _walkBobPhase;
     private float _cameraBob;
+    private float _firstPersonYaw;
     private float _firstPersonPitch = DefaultFirstPersonPitch;
 
     public override void Initialize()
@@ -63,57 +58,37 @@ public sealed partial class World3DGridRenderingSystem : EntitySystem
         base.FrameUpdate(frameTime);
 
         var localEntity = _playerManager.LocalEntity;
-        if (localEntity != _jumpEntity)
+        if (localEntity != _presentationEntity)
         {
-            _jumpEntity = localEntity;
-            _jumpHeight = 0f;
-            _jumpVelocity = 0f;
-            _jumpHeld = false;
+            _presentationEntity = localEntity;
             _walkBobPhase = 0f;
             _cameraBob = 0f;
-            SetFirstPersonPitch(DefaultFirstPersonPitch);
-        }
-
-        var jumpDown = _inputManager.IsKeyDown(Keyboard.Key.Space);
-        if (localEntity is { Valid: true } && jumpDown && !_jumpHeld && _jumpHeight <= 0.001f)
-            _jumpVelocity = 5.2f;
-
-        _jumpHeld = jumpDown;
-
-        if (_jumpHeight > 0f || _jumpVelocity > 0f)
-        {
-            var delta = Math.Clamp(frameTime, 0f, 0.1f);
-            _jumpVelocity -= 14.5f * delta;
-            _jumpHeight += _jumpVelocity * delta;
-            if (_jumpHeight <= 0f)
-            {
-                _jumpHeight = 0f;
-                _jumpVelocity = 0f;
-            }
         }
 
         var bobTarget = 0f;
-        if (_jumpHeight <= 0.001f &&
-            localEntity is { Valid: true } uid &&
-            TryComp(uid, out PhysicsComponent? body) &&
-            body.LinearVelocity.LengthSquared() > 0.04f)
+        if (localEntity is { Valid: true } uid &&
+            TryComp(uid, out PhysicsBody3DComponent? body) &&
+            TryComp(uid, out CharacterController3DComponent? character) &&
+            character.Grounded &&
+            new Vector2(body.LinearVelocity.X, body.LinearVelocity.Y).LengthSquared() > 0.04f)
         {
-            var speed = MathF.Min(body.LinearVelocity.Length(), 7f);
+            var speed = MathF.Min(new Vector2(body.LinearVelocity.X, body.LinearVelocity.Y).Length(), 7f);
             _walkBobPhase += frameTime * (7.5f + speed * 1.35f);
             bobTarget = MathF.Sin(_walkBobPhase) * 0.035f;
         }
 
         _cameraBob += (bobTarget - _cameraBob) * MathF.Min(1f, frameTime * 14f);
-        _overlay?.SetLocalPlayerPresentation(localEntity, _jumpHeight, _cameraBob);
+        _overlay?.SetLocalPlayerPresentation(localEntity, _cameraBob);
     }
 
-    public void SetFirstPersonPitch(float pitch)
+    public void SetFirstPersonView(float yaw, float pitch)
     {
-        if (!float.IsFinite(pitch))
+        if (!float.IsFinite(yaw) || !float.IsFinite(pitch))
             return;
 
+        _firstPersonYaw = yaw;
         _firstPersonPitch = Math.Clamp(pitch, -1.35f, 1.35f);
-        _overlay?.SetFirstPersonPitch(_firstPersonPitch);
+        _overlay?.SetFirstPersonView(_firstPersonYaw, _firstPersonPitch);
     }
 
     /// <summary>
@@ -217,8 +192,8 @@ internal sealed partial class World3DGridOverlay : Overlay
     private bool _reportedMatrix;
     private bool _initialized;
     private EntityUid? _localPlayer;
-    private float _localJumpHeight;
     private float _localCameraBob;
+    private float _firstPersonYaw;
     private float _firstPersonPitch = World3DGridRenderingSystem.DefaultFirstPersonPitch;
 
     private readonly DiagnosticStage _diagnosticStage;
@@ -246,15 +221,15 @@ internal sealed partial class World3DGridOverlay : Overlay
         System.Console.WriteLine($"[SS14-3D] render stage: {_diagnosticStage}");
     }
 
-    public void SetLocalPlayerPresentation(EntityUid? localPlayer, float jumpHeight, float cameraBob)
+    public void SetLocalPlayerPresentation(EntityUid? localPlayer, float cameraBob)
     {
         _localPlayer = localPlayer;
-        _localJumpHeight = MathF.Max(0f, jumpHeight);
         _localCameraBob = cameraBob;
     }
 
-    public void SetFirstPersonPitch(float pitch)
+    public void SetFirstPersonView(float yaw, float pitch)
     {
+        _firstPersonYaw = yaw;
         _firstPersonPitch = pitch;
     }
 
@@ -298,26 +273,24 @@ internal sealed partial class World3DGridOverlay : Overlay
             cameraBase = _transform3DSystem.GetWorldPosition3D(localPlayer, localTransform);
         }
 
-        var forward2 = eye.Rotation.ToWorldVec();
         var camera = cameraBase + new Vector3(
             0f,
             0f,
-            FirstPersonEyeHeight + _localJumpHeight + _localCameraBob);
+            FirstPersonEyeHeight + _localCameraBob);
 
-        // Angle zero points south in the 2D renderer while MoveUp points north. Looking opposite
-        // eye-forward preserves the established camera-relative movement convention in first person.
         var horizontalLook = MathF.Cos(_firstPersonPitch);
         var lookDirection = new Vector3(
-            -forward2.X * horizontalLook,
-            -forward2.Y * horizontalLook,
+            MathF.Sin(_firstPersonYaw) * horizontalLook,
+            MathF.Cos(_firstPersonYaw) * horizontalLook,
             MathF.Sin(_firstPersonPitch));
         var target = camera + lookDirection;
 
         var billboardForward = new Vector2(lookDirection.X, lookDirection.Y);
         if (billboardForward.LengthSquared() < 1e-6f)
-            billboardForward = -forward2;
+            billboardForward = new Vector2(MathF.Sin(_firstPersonYaw), MathF.Cos(_firstPersonYaw));
         billboardForward = Vector2.Normalize(billboardForward);
         var billboardRight = new Vector2(-billboardForward.Y, billboardForward.X);
+        var cameraFacingRotation = new Angle(-_firstPersonYaw);
 
         // Legacy SS14 still stores separate floors in separate MapIds. Content can now provide a set
         // of those maps that represent one 3D space, and the renderer composes all of them into this pass.
@@ -334,7 +307,7 @@ internal sealed partial class World3DGridOverlay : Overlay
                 AppendMap(
                     mapId,
                     eyeWorld,
-                    eye.Rotation,
+                    cameraFacingRotation,
                     billboardRight,
                     billboardForward,
                     ref gridCount,
@@ -350,7 +323,7 @@ internal sealed partial class World3DGridOverlay : Overlay
             AppendMap(
                 args.MapId,
                 eyeWorld,
-                eye.Rotation,
+                cameraFacingRotation,
                 billboardRight,
                 billboardForward,
                 ref gridCount,
