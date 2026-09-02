@@ -1,6 +1,7 @@
 using System;
 using System.Numerics;
 using Robust.Shared.GameObjects;
+using Robust.Shared.Maths;
 
 namespace Robust.Shared.Physics3D;
 
@@ -37,6 +38,11 @@ public readonly record struct PhysicsSweepHit3D(
     Vector3 Position,
     Vector3 Normal,
     float Distance,
+    bool Sensor);
+
+public readonly record struct PhysicsOverlap3D(
+    EntityUid Entity,
+    Box3 Bounds,
     bool Sensor);
 
 public readonly record struct PhysicsContact3D(

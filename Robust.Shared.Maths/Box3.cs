@@ -14,6 +14,10 @@ public readonly record struct Box3
     public Vector3 Size => Max - Min;
     public Vector3 Center => (Min + Max) * 0.5f;
     public float Volume => MathF.Abs(Size.X * Size.Y * Size.Z);
+    public bool IsFinite =>
+        float.IsFinite(Min.X) && float.IsFinite(Min.Y) && float.IsFinite(Min.Z) &&
+        float.IsFinite(Max.X) && float.IsFinite(Max.Y) && float.IsFinite(Max.Z);
+    public bool IsValid => IsFinite && Min.X <= Max.X && Min.Y <= Max.Y && Min.Z <= Max.Z;
 
     public Box3(Vector3 min, Vector3 max)
     {

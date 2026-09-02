@@ -78,6 +78,10 @@ public sealed partial class ConvexHullShape3D : CollisionShape3D
 [DataDefinition]
 public sealed partial class TriangleMeshShape3D : CollisionShape3D
 {
+    /// <summary>
+    /// Triangle meshes are concave, one-sided world geometry and are accepted only on static or kinematic
+    /// bodies. Moving props must use primitives, convex hulls, or compounds of convex shapes.
+    /// </summary>
     [DataField(required: true)]
     public List<Vector3> Vertices = new();
 
