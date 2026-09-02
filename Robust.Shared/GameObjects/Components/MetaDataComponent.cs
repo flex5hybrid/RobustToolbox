@@ -254,7 +254,13 @@ namespace Robust.Shared.GameObjects
     /// <summary>
     /// Key struct for uniquely identifying a PVS chunk.
     /// </summary>
-    internal readonly record struct PvsChunkLocation(EntityUid Uid, Vector2i Indices);
+    internal readonly record struct PvsChunkLocation(EntityUid Uid, Vector3i Indices)
+    {
+        public PvsChunkLocation(EntityUid uid, Vector2i indices)
+            : this(uid, new Vector3i(indices.X, indices.Y, 0))
+        {
+        }
+    }
 
     /// <summary>
     /// An opaque index into the PVS data arrays on the server.

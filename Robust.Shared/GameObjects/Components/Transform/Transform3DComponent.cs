@@ -60,3 +60,10 @@ public sealed class Transform3DComponentState : ComponentState
     public float ScaleY;
     public float ScaleZ;
 }
+
+/// <summary>
+/// Raised whenever the authoritative local XYZ position changes. Systems that partition space must listen to this
+/// event instead of relying on the legacy XY move event.
+/// </summary>
+[ByRefEvent]
+public readonly record struct Transform3DPositionChangedEvent(Vector3 OldPosition, Vector3 NewPosition);

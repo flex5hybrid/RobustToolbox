@@ -81,15 +81,16 @@ internal sealed partial class PvsSystem
         // Update visibility masks & viewer positions
         // TODO PVS do this before sending state.
         // I,e, we already enumerate over all eyes when computing visible chunks.
-        Span<(MapCoordinates pos, float scale)> positions = stackalloc (MapCoordinates, float)[session.Viewers.Length];
+        Span<(MapCoordinates3D pos, float scale)> positions = stackalloc (MapCoordinates3D, float)[session.Viewers.Length];
         int i = 0;
         foreach (var viewer in session.Viewers)
         {
             if (viewer.Comp2 != null)
                 session.VisMask |= viewer.Comp2.VisibilityMask;
 
-            var mapCoordinates = _transform.GetMapCoordinates(viewer.Owner, viewer.Comp1);
-            mapCoordinates = mapCoordinates.Offset(viewer.Comp2?.Offset ?? Vector2.Zero);
+            var worldPosition = _transform3D.GetWorldPosition3D(viewer.Owner, viewer.Comp1);
+            worldPosition += new Vector3(viewer.Comp2?.Offset ?? Vector2.Zero, 0f);
+            var mapCoordinates = new MapCoordinates3D(worldPosition, viewer.Comp1.MapID);
             var scale = MathF.Max((viewer.Comp2?.PvsScale ?? 1), 0.1f);
             positions[i++] = (mapCoordinates, scale);
         }
@@ -123,10 +124,10 @@ internal sealed partial class PvsSystem
 
                 dist = Math.Min(dist, (pos.Position - chunk.Position.Position).LengthSquared());
 
-                var relative = Vector2.Transform(pos.Position, chunk.InvWorldMatrix)  - chunk.Centre;
+                var relative = Vector3.Transform(pos.Position, chunk.InvWorldMatrix) - chunk.Centre;
 
-                relative = Vector2.Abs(relative);
-                chebDist = Math.Min(chebDist, Math.Max(relative.X, relative.Y) / scale);
+                relative = Vector3.Abs(relative);
+                chebDist = Math.Min(chebDist, Math.Max(relative.X, Math.Max(relative.Y, relative.Z)) / scale);
             }
 
             distances.Add(dist);

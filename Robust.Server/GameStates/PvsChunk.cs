@@ -57,17 +57,17 @@ internal sealed class PvsChunk
     /// <summary>
     /// The location of the centre of this chunk, relative to the <see cref="Root"/>
     /// </summary>
-    public Vector2 Centre;
+    public Vector3 Centre;
 
     /// <summary>
     /// The map position of the chunk's centre during the last PVS update.
     /// </summary>
-    public MapCoordinates Position;
+    public MapCoordinates3D Position;
 
     /// <summary>
     /// The <see cref="Root"/>'s inverse world matrix.
     /// </summary>
-    public Matrix3x2 InvWorldMatrix { get; set; }
+    public Matrix4x4 InvWorldMatrix { get; set; }
 
     // These are only used while populating the chunk. They aren't local variables because the chunks are pooled, so
     // the same chunk can be repopulated more than once.
@@ -123,7 +123,7 @@ internal sealed class PvsChunk
         }
         Map = new(rootXform.MapUid.Value, mapMeta);
 
-        Centre = (Location.Indices + new Vector2(0.5f)) * PvsSystem.ChunkSize;
+        Centre = ((Vector3) Location.Indices + new Vector3(0.5f)) * PvsSystem.ChunkSize;
     }
 
     /// <summary>

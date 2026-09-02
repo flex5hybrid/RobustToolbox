@@ -36,7 +36,14 @@ internal sealed partial class PvsSystem
     private List<Entity<MapGridComponent>> _grids = new();
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static Vector2i GetChunkIndices(Vector2 coordinates) => (coordinates / ChunkSize).Floored();
+    public static Vector3i GetChunkIndices(Vector3 coordinates)
+    {
+        coordinates /= ChunkSize;
+        return new Vector3i(
+            (int) MathF.Floor(coordinates.X),
+            (int) MathF.Floor(coordinates.Y),
+            (int) MathF.Floor(coordinates.Z));
+    }
 
     /// <summary>
     /// Iterate over all visible chunks and, if necessary, re-construct their list of entities.
@@ -77,9 +84,12 @@ internal sealed partial class PvsSystem
 
         var xform = Transform(chunk.Root);
         DebugTools.AssertEqual(chunk.Map.Owner, xform.MapUid);
-        chunk.InvWorldMatrix = xform.InvLocalMatrix;
-        var worldPos = Vector2.Transform(chunk.Centre, xform.LocalMatrix);
-        chunk.Position = new(worldPos, xform.MapID);
+        var worldMatrix = _transform3D.GetWorldMatrix3D(chunk.Root.Owner, xform);
+        chunk.InvWorldMatrix = Matrix4x4.Invert(worldMatrix, out var inverse)
+            ? inverse
+            : Matrix4x4.Identity;
+        var worldPos = Vector3.Transform(chunk.Centre, worldMatrix);
+        chunk.Position = new MapCoordinates3D(worldPos, xform.MapID);
         chunk.UpdateQueued = false;
     }
 
@@ -118,50 +128,65 @@ internal sealed partial class PvsSystem
         if (mapUid is not {} map)
             return;
 
-        var mapChunkEnumerator = new ChunkIndicesEnumerator(viewPos, range, ChunkSize);
+        var mapChunkEnumerator = new ChunkIndicesEnumerator3D(viewPos, range, ChunkSize);
         while (mapChunkEnumerator.MoveNext(out var chunkIndices))
         {
             var loc = new PvsChunkLocation(map, chunkIndices.Value);
-            if (!_chunks.TryGetValue(loc, out var chunk))
-                continue;
-
-            chunks.Add(chunk);
-            if (chunk.UpdateQueued)
-                continue;
-
-            chunk.UpdateQueued = true;
-            if (chunk.Dirty)
-                _dirtyChunks.Add(chunk);
-            else
-                _cleanChunks.Add(chunk);
+            QueueVisibleChunk(loc, chunks);
         }
 
         _grids.Clear();
-        var rangeVec = new Vector2(range, range);
-        var box = new Box2(viewPos - rangeVec, viewPos + rangeVec);
+        var rangeVec = new Vector2(range);
+        var viewPos2D = new Vector2(viewPos.X, viewPos.Y);
+        var box = new Box2(viewPos2D - rangeVec, viewPos2D + rangeVec);
         _maps.FindGridsIntersecting(map, box, ref _grids, approx: true, includeMap: false);
 
         foreach (var (grid, _) in _grids)
         {
-            var localPos = Vector2.Transform(viewPos, _transform.GetInvWorldMatrix(grid));
-            var gridChunkEnumerator = new ChunkIndicesEnumerator(localPos, range, ChunkSize);
+            if (!Matrix4x4.Invert(_transform3D.GetWorldMatrix3D(grid), out var inverse))
+                continue;
+
+            var localPos = Vector3.Transform(viewPos, inverse);
+            var gridChunkEnumerator = new ChunkIndicesEnumerator3D(localPos, range, ChunkSize);
             while (gridChunkEnumerator.MoveNext(out var gridChunkIndices))
             {
                 var loc = new PvsChunkLocation(grid, gridChunkIndices.Value);
-                if (!_chunks.TryGetValue(loc, out var chunk))
-                    continue;
-
-                chunks.Add(chunk);
-                if (chunk.UpdateQueued)
-                    continue;
-
-                chunk.UpdateQueued = true;
-                if (chunk.Dirty)
-                    _dirtyChunks.Add(chunk);
-                else
-                    _cleanChunks.Add(chunk);
+                QueueVisibleChunk(loc, chunks);
             }
         }
+
+        // Native 3D grids do not participate in the legacy 2D grid broadphase. Until the map owns a native
+        // volume index, enumerate those roots explicitly and transform the viewer into each grid's local space.
+        var grid3DQuery = EntityQueryEnumerator<MapGrid3DComponent, TransformComponent>();
+        while (grid3DQuery.MoveNext(out var grid, out _, out var gridTransform))
+        {
+            if (gridTransform.MapUid != map || HasComp<MapGridComponent>(grid))
+                continue;
+
+            if (!Matrix4x4.Invert(_transform3D.GetWorldMatrix3D(grid, gridTransform), out var inverse))
+                continue;
+
+            var localPos = Vector3.Transform(viewPos, inverse);
+            var gridChunkEnumerator = new ChunkIndicesEnumerator3D(localPos, range, ChunkSize);
+            while (gridChunkEnumerator.MoveNext(out var gridChunkIndices))
+                QueueVisibleChunk(new PvsChunkLocation(grid, gridChunkIndices.Value), chunks);
+        }
+    }
+
+    private void QueueVisibleChunk(PvsChunkLocation location, HashSet<PvsChunk> chunks)
+    {
+        if (!_chunks.TryGetValue(location, out var chunk))
+            return;
+
+        chunks.Add(chunk);
+        if (chunk.UpdateQueued)
+            return;
+
+        chunk.UpdateQueued = true;
+        if (chunk.Dirty)
+            _dirtyChunks.Add(chunk);
+        else
+            _cleanChunks.Add(chunk);
     }
 
     /// <summary>
@@ -396,6 +421,11 @@ internal sealed partial class PvsSystem
     private void OnGridRemoved(GridRemovalEvent ev)
     {
         RemoveRoot(ev.EntityUid);
+    }
+
+    private void OnGrid3DRemoved(Entity<MapGrid3DComponent> grid, ref ComponentShutdown args)
+    {
+        RemoveRoot(grid.Owner);
     }
 
     private void OnMapChanged(MapRemovedEvent ev)

@@ -16,6 +16,7 @@ using Robust.Shared.Configuration;
 using Robust.Shared.GameObjects;
 using Robust.Shared.GameStates;
 using Robust.Shared.Map;
+using Robust.Shared.Map.Components;
 using Robust.Shared.Network;
 using Robust.Shared.Player;
 using Robust.Shared.Threading;
@@ -34,6 +35,7 @@ internal sealed partial class PvsSystem : EntitySystem
     [Dependency] private IServerGameStateManager _serverGameStateManager = default!;
     [Dependency] private IServerNetConfigurationManager _netConfigManager = default!;
     [Dependency] private SharedTransformSystem _transform = default!;
+    [Dependency] private SharedTransform3DSystem _transform3D = default!;
     [Dependency] private InputSystem _input = default!;
     [Dependency] private IServerNetManager _netMan = default!;
     [Dependency] private IParallelManagerInternal _parallelMgr = default!;
@@ -58,12 +60,12 @@ internal sealed partial class PvsSystem : EntitySystem
     public bool CullingEnabled { get; private set; }
 
     /// <summary>
-    /// Size of the side of the view bounds square. Related to <see cref="CVars.NetMaxUpdateRange"/>
+    /// Size of the side of the view bounds cube. Related to <see cref="CVars.NetMaxUpdateRange"/>
     /// </summary>
     private float _viewSize;
 
     /// <summary>
-    /// Size of the side of the priority view bounds square. Related to <see cref="CVars.NetPvsPriorityRange"/>
+    /// Size of the side of the priority view bounds cube. Related to <see cref="CVars.NetPvsPriorityRange"/>
     /// </summary>
     private float _priorityViewSize;
 
@@ -133,7 +135,9 @@ internal sealed partial class PvsSystem : EntitySystem
 
         SubscribeLocalEvent<MapRemovedEvent>(OnMapChanged);
         SubscribeLocalEvent<GridRemovalEvent>(OnGridRemoved);
+        SubscribeLocalEvent<MapGrid3DComponent, ComponentShutdown>(OnGrid3DRemoved);
         SubscribeLocalEvent<TransformComponent, TransformStartupEvent>(OnTransformStartup);
+        SubscribeLocalEvent<Transform3DComponent, Transform3DPositionChangedEvent>(OnEntityMove3D);
         SubscribeLocalEvent<ChunkEntityAddedEvent>(OnChunkEntityAdded);
         SubscribeLocalEvent<ChunkEntityRemovedEvent>(OnChunkEntityRemoved);
         _playerManager.PlayerStatusChanged += OnPlayerStatusChanged;
@@ -386,15 +390,15 @@ internal sealed partial class PvsSystem : EntitySystem
     }
 #endif
 
-    private (Vector2 worldPos, float range, EntityUid? map) CalcViewBounds(Entity<TransformComponent, EyeComponent?> eye)
+    private (Vector3 worldPos, float range, EntityUid? map) CalcViewBounds(Entity<TransformComponent, EyeComponent?> eye)
     {
         var size = _priorityViewSize;
-        var worldPos = _transform.GetWorldPosition(eye.Comp1);
+        var worldPos = _transform3D.GetWorldPosition3D(eye.Owner, eye.Comp1);
 
         if (eye.Comp2 is not null)
         {
             // not using EyeComponent.Eye.Position, because it's updated only on the client's side
-            worldPos += eye.Comp2.Offset;
+            worldPos += new Vector3(eye.Comp2.Offset, 0f);
             size *= eye.Comp2.PvsScale;
         }
 

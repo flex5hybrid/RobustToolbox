@@ -17,6 +17,17 @@ internal sealed partial class PvsSystem
         UpdatePosition(ev.Entity.Owner, ev.Entity.Comp1, ev.Entity.Comp2, ev.OldPosition.EntityId);
     }
 
+    private void OnEntityMove3D(Entity<Transform3DComponent> entity, ref Transform3DPositionChangedEvent ev)
+    {
+        if (!_xformQuery.TryGetComponent(entity.Owner, out var transform) ||
+            !_metaQuery.TryGetComponent(entity.Owner, out var metadata))
+        {
+            return;
+        }
+
+        UpdatePosition(entity.Owner, transform, metadata, transform.ParentUid);
+    }
+
     private void OnTransformStartup(EntityUid uid, TransformComponent component, ref TransformStartupEvent args)
     {
         if (component.ParentUid == EntityUid.Invalid)
@@ -52,16 +63,22 @@ internal sealed partial class PvsSystem
         DebugTools.Assert(!HasComp<MapGridComponent>(uid));
         DebugTools.Assert(!HasComp<MapComponent>(uid));
 
+        var root = GetPvsRoot(xform);
+        if (root == uid)
+            return;
+
         if (oldParent != xform.ParentUid)
         {
             HandleParentChange(uid, xform, meta);
             return;
         }
 
-        if (xform.ParentUid != xform.GridUid && xform.ParentUid != xform.MapUid)
+        if (root is null || xform.ParentUid != root)
             return;
 
-        var location = new PvsChunkLocation(xform.ParentUid, GetChunkIndices(xform._localPosition));
+        var location = new PvsChunkLocation(
+            root.Value,
+            GetChunkIndices(_transform3D.GetLocalPosition3D(uid, xform)));
         if (meta.LastPvsLocation == location)
             return;
 
@@ -77,7 +94,7 @@ internal sealed partial class PvsSystem
         if (xform.ParentUid == EntityUid.Invalid || xform.ParentUid == uid)
             return;
 
-        var newRoot = (xform.GridUid ?? xform.MapUid);
+        var newRoot = GetPvsRoot(xform);
         if (newRoot == null)
         {
             AssertNullspace(xform.ParentUid);
@@ -87,7 +104,9 @@ internal sealed partial class PvsSystem
         // If directly parented to the chunk, add as a direct child.
         if (xform.ParentUid == newRoot)
         {
-            var location = new PvsChunkLocation(newRoot.Value, GetChunkIndices(xform._localPosition));
+            var location = new PvsChunkLocation(
+                newRoot.Value,
+                GetChunkIndices(_transform3D.GetLocalPosition3D(uid, xform)));
             AddEntityToChunk(uid, meta, location);
             return;
         }
@@ -95,6 +114,27 @@ internal sealed partial class PvsSystem
         // Else, mark the new parent's last chunk as dirty. Null implies it is already dirty.
         if (MetaData(xform.ParentUid).LastPvsLocation is { } loc)
             DirtyChunk(loc);
+    }
+
+    private EntityUid? GetPvsRoot(TransformComponent transform)
+    {
+        var current = transform.ParentUid;
+        for (var depth = 0; depth < 256 && current.IsValid(); depth++)
+        {
+            if (HasComp<MapGrid3DComponent>(current) ||
+                HasComp<MapGridComponent>(current) ||
+                HasComp<MapComponent>(current))
+            {
+                return current;
+            }
+
+            if (!_xformQuery.TryGetComponent(current, out var parent) || parent.ParentUid == current)
+                return null;
+
+            current = parent.ParentUid;
+        }
+
+        return null;
     }
 
     [Conditional("DEBUG")]

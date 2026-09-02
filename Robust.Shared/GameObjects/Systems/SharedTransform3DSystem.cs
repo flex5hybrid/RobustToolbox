@@ -349,8 +349,11 @@ public sealed class SharedTransform3DSystem : EntitySystem
         if (transform3D.LocalPosition3D.Equals(position))
             return;
 
+        var oldPosition = transform3D.LocalPosition3D;
         transform3D.LocalPosition3D = position;
         Dirty(uid, transform3D);
+        var moveEvent = new Transform3DPositionChangedEvent(oldPosition, position);
+        RaiseLocalEvent(uid, ref moveEvent);
     }
 
     private void OnGetState(Entity<Transform3DComponent> entity, ref ComponentGetState args)
@@ -379,6 +382,7 @@ public sealed class SharedTransform3DSystem : EntitySystem
         if (args.Current is not Transform3DComponentState state)
             return;
 
+        var oldPosition = entity.Comp.LocalPosition3D;
         var position = new Vector3(state.X, state.Y, state.Z);
         entity.Comp.Authoritative = state.Authoritative;
         entity.Comp.LocalPosition3D = IsFinite(position) ? position : Vector3.Zero;
@@ -392,6 +396,12 @@ public sealed class SharedTransform3DSystem : EntitySystem
 
         var scale = new Vector3(state.ScaleX, state.ScaleY, state.ScaleZ);
         entity.Comp.LocalScale3D = IsUsableScale(scale) ? scale : Vector3.One;
+
+        if (oldPosition != entity.Comp.LocalPosition3D)
+        {
+            var moveEvent = new Transform3DPositionChangedEvent(oldPosition, entity.Comp.LocalPosition3D);
+            RaiseLocalEvent(entity.Owner, ref moveEvent);
+        }
     }
 
     private static Angle GetYaw(Quaternion rotation)
