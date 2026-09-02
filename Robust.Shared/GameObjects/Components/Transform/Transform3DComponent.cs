@@ -67,3 +67,9 @@ public sealed class Transform3DComponentState : ComponentState
 /// </summary>
 [ByRefEvent]
 public readonly record struct Transform3DPositionChangedEvent(Vector3 OldPosition, Vector3 NewPosition);
+
+/// <summary>
+/// Raised after a network state replaces a 3D pose, allowing prediction backends to rebuild from the server snapshot.
+/// </summary>
+[ByRefEvent]
+public readonly record struct Transform3DStateAppliedEvent;

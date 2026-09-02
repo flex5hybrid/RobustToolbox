@@ -402,6 +402,9 @@ public sealed class SharedTransform3DSystem : EntitySystem
             var moveEvent = new Transform3DPositionChangedEvent(oldPosition, entity.Comp.LocalPosition3D);
             RaiseLocalEvent(entity.Owner, ref moveEvent);
         }
+
+        var appliedEvent = new Transform3DStateAppliedEvent();
+        RaiseLocalEvent(entity.Owner, ref appliedEvent);
     }
 
     private static Angle GetYaw(Quaternion rotation)

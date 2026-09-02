@@ -17,8 +17,9 @@ using Robust.Shared.Network;
 namespace Robust.Shared.Physics3D;
 
 /// <summary>
-/// Owns server-side Bepu simulations and synchronizes their results into authoritative Transform3D state.
-/// Content interacts with components and this system; backend handles never cross the engine boundary.
+/// Owns authoritative server Bepu simulations and the client prediction mirror. Content interacts with components
+/// and this system; backend handles never cross the engine boundary and only explicitly predicted client bodies
+/// can write simulated poses back into Transform3D state.
 /// </summary>
 public sealed class SharedPhysics3DSystem : EntitySystem
 {
@@ -46,6 +47,11 @@ public sealed class SharedPhysics3DSystem : EntitySystem
         SubscribeLocalEvent<PhysicsBody3DComponent, ComponentShutdown>(OnBodyShutdown);
         SubscribeLocalEvent<Collider3DComponent, ComponentStartup>(OnColliderStartup);
         SubscribeLocalEvent<Collider3DComponent, ComponentShutdown>(OnColliderShutdown);
+        SubscribeLocalEvent<PhysicsBody3DComponent, AfterAutoHandleStateEvent>(OnBodyStateApplied);
+        SubscribeLocalEvent<Collider3DComponent, AfterAutoHandleStateEvent>(OnColliderStateApplied);
+        SubscribeLocalEvent<Transform3DComponent, Transform3DStateAppliedEvent>(OnTransformStateApplied);
+        SubscribeLocalEvent<PredictedPhysics3DComponent, ComponentStartup>(OnPredictionStartup);
+        SubscribeLocalEvent<PredictedPhysics3DComponent, ComponentShutdown>(OnPredictionShutdown);
         SubscribeLocalEvent<PhysicsJoint3DComponent, ComponentStartup>(OnJointStartup);
         SubscribeLocalEvent<PhysicsJoint3DComponent, ComponentShutdown>(OnJointShutdown);
         SubscribeLocalEvent<MapRemovedEvent>(OnMapRemoved);
@@ -54,9 +60,6 @@ public sealed class SharedPhysics3DSystem : EntitySystem
     public override void Update(float frameTime)
     {
         base.Update(frameTime);
-
-        if (!_network.IsServer)
-            return;
 
         RefreshCrossMapBodies();
         FlushPending();
@@ -81,7 +84,10 @@ public sealed class SharedPhysics3DSystem : EntitySystem
         if (steps > 0)
         {
             SynchronizeDynamicBodies();
-            DispatchContactEvents();
+            if (_network.IsServer)
+                DispatchContactEvents();
+            else
+                ClearContactTransitions();
         }
     }
 
@@ -103,18 +109,12 @@ public sealed class SharedPhysics3DSystem : EntitySystem
 
     public void RefreshBody(EntityUid uid)
     {
-        if (!_network.IsServer)
-            return;
-
         RemoveBody(uid);
         _pending.Add(uid);
     }
 
     public void RefreshJoint(EntityUid uid)
     {
-        if (!_network.IsServer)
-            return;
-
         RemoveJoint(uid);
         _pendingJoints.Add(uid);
     }
@@ -500,19 +500,26 @@ public sealed class SharedPhysics3DSystem : EntitySystem
 
     /// <summary>
     /// Converts world-space horizontal input into a dynamic upright character velocity. Call this once per
-    /// server simulation update before this system advances its fixed physics worlds.
+    /// server or predicted client simulation update before this system advances its fixed physics worlds.
     /// </summary>
     public bool DriveCharacter(EntityUid uid, Vector2 wishDirection, bool sprinting, float frameTime)
     {
-        if (!_network.IsServer ||
-            !TryComp(uid, out CharacterController3DComponent? character) ||
+        if (!TryComp(uid, out CharacterController3DComponent? character) ||
             !TryComp(uid, out PhysicsBody3DComponent? body) ||
             body.BodyType != PhysicsBodyType3D.Character ||
-            !TryComp(uid, out TransformComponent? transform) ||
-            !TryGetVelocity(uid, out var linear, out var angular))
+            !TryComp(uid, out TransformComponent? transform))
         {
             return false;
         }
+
+        if (!_network.IsServer && !_registrations.ContainsKey(uid))
+        {
+            _pending.Remove(uid);
+            TryCreateBody(uid);
+        }
+
+        if (!TryGetVelocity(uid, out var linear, out var angular))
+            return false;
 
         var position = _transform3D.GetWorldPosition3D(uid, transform);
         var probeOrigin = position + Vector3.UnitZ * MathF.Max(0f, character.GroundProbeStart);
@@ -568,8 +575,7 @@ public sealed class SharedPhysics3DSystem : EntitySystem
 
     private void OnBodyStartup(Entity<PhysicsBody3DComponent> entity, ref ComponentStartup args)
     {
-        if (_network.IsServer)
-            _pending.Add(entity.Owner);
+        _pending.Add(entity.Owner);
     }
 
     private void OnBodyShutdown(Entity<PhysicsBody3DComponent> entity, ref ComponentShutdown args)
@@ -579,8 +585,7 @@ public sealed class SharedPhysics3DSystem : EntitySystem
 
     private void OnColliderStartup(Entity<Collider3DComponent> entity, ref ComponentStartup args)
     {
-        if (_network.IsServer)
-            _pending.Add(entity.Owner);
+        _pending.Add(entity.Owner);
     }
 
     private void OnColliderShutdown(Entity<Collider3DComponent> entity, ref ComponentShutdown args)
@@ -590,8 +595,37 @@ public sealed class SharedPhysics3DSystem : EntitySystem
 
     private void OnJointStartup(Entity<PhysicsJoint3DComponent> entity, ref ComponentStartup args)
     {
-        if (_network.IsServer)
-            _pendingJoints.Add(entity.Owner);
+        _pendingJoints.Add(entity.Owner);
+    }
+
+    private void OnBodyStateApplied(Entity<PhysicsBody3DComponent> entity, ref AfterAutoHandleStateEvent args)
+    {
+        if (!_network.IsServer)
+            RefreshBody(entity.Owner);
+    }
+
+    private void OnColliderStateApplied(Entity<Collider3DComponent> entity, ref AfterAutoHandleStateEvent args)
+    {
+        if (!_network.IsServer)
+            RefreshBody(entity.Owner);
+    }
+
+    private void OnTransformStateApplied(Entity<Transform3DComponent> entity, ref Transform3DStateAppliedEvent args)
+    {
+        if (!_network.IsServer && HasComp<PhysicsBody3DComponent>(entity.Owner))
+            RefreshBody(entity.Owner);
+    }
+
+    private void OnPredictionStartup(Entity<PredictedPhysics3DComponent> entity, ref ComponentStartup args)
+    {
+        if (!_network.IsServer)
+            RefreshBody(entity.Owner);
+    }
+
+    private void OnPredictionShutdown(Entity<PredictedPhysics3DComponent> entity, ref ComponentShutdown args)
+    {
+        if (!_network.IsServer)
+            RefreshBody(entity.Owner);
     }
 
     private void OnJointShutdown(Entity<PhysicsJoint3DComponent> entity, ref ComponentShutdown args)
@@ -825,6 +859,13 @@ public sealed class SharedPhysics3DSystem : EntitySystem
             !TryComp(uid, out TransformComponent? transform) ||
             transform.MapID == MapId.Nullspace ||
             collider.Shapes.Count == 0)
+        {
+            return false;
+        }
+
+        if (!_network.IsServer &&
+            body.BodyType is PhysicsBodyType3D.Dynamic or PhysicsBodyType3D.Character &&
+            !HasComp<PredictedPhysics3DComponent>(uid))
         {
             return false;
         }
@@ -1245,6 +1286,7 @@ public sealed class SharedPhysics3DSystem : EntitySystem
         {
             if (registration.IsStatic ||
                 !TryComp(uid, out PhysicsBody3DComponent? body) ||
+                (!_network.IsServer && !HasComp<PredictedPhysics3DComponent>(uid)) ||
                 !_worlds.TryGetValue(registration.MapId, out var world))
             {
                 continue;
@@ -1266,6 +1308,12 @@ public sealed class SharedPhysics3DSystem : EntitySystem
                 Dirty(uid, body);
             }
         }
+    }
+
+    private void ClearContactTransitions()
+    {
+        foreach (var world in _worlds.Values)
+            world.Contacts.Transitions.Clear();
     }
 
     private static Quaternion RemoveShapeRotation(Quaternion physicsRotation, Quaternion shapeRotation)
