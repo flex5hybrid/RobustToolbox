@@ -31,21 +31,21 @@ public abstract partial class CollisionShape3D
     public float Restitution;
 }
 
-[DataDefinition]
+[DataDefinition, Serializable, NetSerializable]
 public sealed partial class BoxShape3D : CollisionShape3D
 {
     [DataField(required: true)]
     public Vector3 Size = Vector3.One;
 }
 
-[DataDefinition]
+[DataDefinition, Serializable, NetSerializable]
 public sealed partial class SphereShape3D : CollisionShape3D
 {
     [DataField(required: true)]
     public float Radius = 0.5f;
 }
 
-[DataDefinition]
+[DataDefinition, Serializable, NetSerializable]
 public sealed partial class CapsuleShape3D : CollisionShape3D
 {
     [DataField(required: true)]
@@ -58,7 +58,7 @@ public sealed partial class CapsuleShape3D : CollisionShape3D
     public float Length = 1f;
 }
 
-[DataDefinition]
+[DataDefinition, Serializable, NetSerializable]
 public sealed partial class CylinderShape3D : CollisionShape3D
 {
     [DataField(required: true)]
@@ -68,14 +68,14 @@ public sealed partial class CylinderShape3D : CollisionShape3D
     public float Length = 1f;
 }
 
-[DataDefinition]
+[DataDefinition, Serializable, NetSerializable]
 public sealed partial class ConvexHullShape3D : CollisionShape3D
 {
     [DataField(required: true)]
     public List<Vector3> Points = new();
 }
 
-[DataDefinition]
+[DataDefinition, Serializable, NetSerializable]
 public sealed partial class TriangleMeshShape3D : CollisionShape3D
 {
     /// <summary>
