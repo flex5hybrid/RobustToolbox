@@ -115,6 +115,31 @@ public sealed class SharedMapGrid3DSystem : EntitySystem
         }
     }
 
+    /// <summary>
+    /// Enumerates only occupied cells without scanning the empty volume between sparse chunks.
+    /// The returned indices are grid-local cell coordinates.
+    /// </summary>
+    public IEnumerable<(Vector3i Indices, Voxel3D Voxel)> GetOccupiedVoxels(Entity<MapGrid3DComponent?> grid)
+    {
+        if (!Resolve(grid, ref grid.Comp, false))
+            yield break;
+
+        var size = grid.Comp.ChunkSize;
+        foreach (var (chunkIndices, chunk) in grid.Comp.Chunks)
+        {
+            var origin = chunkIndices * size;
+            for (var z = 0; z < size; z++)
+            for (var y = 0; y < size; y++)
+            for (var x = 0; x < size; x++)
+            {
+                var local = new Vector3i(x, y, z);
+                var voxel = chunk[Flatten(local, size)];
+                if (!voxel.IsEmpty)
+                    yield return (origin + local, voxel);
+            }
+        }
+    }
+
     public Vector3 CellToLocal(Entity<MapGrid3DComponent?> grid, Vector3i indices, bool center = true)
     {
         if (!Resolve(grid, ref grid.Comp, false))

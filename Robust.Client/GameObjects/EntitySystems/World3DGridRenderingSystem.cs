@@ -6,6 +6,7 @@ using Robust.Client.Graphics;
 using Robust.Client.Graphics.Clyde;
 using Robust.Client.Map;
 using Robust.Client.Player;
+using Robust.Client.ResourceManagement;
 using Robust.Shared.Enums;
 using Robust.Shared.GameObjects;
 using Robust.Shared.IoC;
@@ -34,6 +35,8 @@ public sealed partial class World3DGridRenderingSystem : EntitySystem
     [Dependency] private IClydeInternal _clyde = default!;
     [Dependency] private IPlayerManager _playerManager = default!;
     [Dependency] private SharedPhysics3DSystem _physics3D = default!;
+    [Dependency] private SharedMapGrid3DSystem _mapGrid3D = default!;
+    [Dependency] private IResourceCache _resourceCache = default!;
 
     private World3DGridOverlay? _overlay;
     private EntityUid? _presentationEntity;
@@ -51,7 +54,9 @@ public sealed partial class World3DGridRenderingSystem : EntitySystem
             _mapSystem,
             _tileDefinitionManager,
             _clyde,
-            _physics3D);
+            _physics3D,
+            _mapGrid3D,
+            _resourceCache);
         _overlayManager.AddOverlay(_overlay);
     }
 
@@ -121,7 +126,7 @@ public sealed partial class World3DGridRenderingSystem : EntitySystem
 
 internal sealed partial class World3DGridOverlay : Overlay
 {
-    private const int FloatsPerVertex = 8;
+    private const int FloatsPerVertex = 9;
     private const float FloorBottom = -0.12f;
     private const float RenderRadius = 28f;
     private const float WallHeight = 2.6f;
@@ -133,11 +138,11 @@ internal sealed partial class World3DGridOverlay : Overlay
     private const string VertexShaderSource = """
         #version 330 core
         layout(location = 0) in vec3 aPosition;
-        layout(location = 1) in vec3 aColor;
+        layout(location = 1) in vec4 aColor;
         layout(location = 2) in vec2 aUv;
         uniform mat4 uMvp;
         uniform int uClipSpace;
-        out vec3 vColor;
+        out vec4 vColor;
         out vec2 vUv;
         void main()
         {
@@ -151,7 +156,7 @@ internal sealed partial class World3DGridOverlay : Overlay
 
     private const string FragmentShaderSource = """
         #version 330 core
-        in vec3 vColor;
+        in vec4 vColor;
         in vec2 vUv;
         uniform sampler2D uTexture;
         uniform int uUseTexture;
@@ -163,11 +168,11 @@ internal sealed partial class World3DGridOverlay : Overlay
                 vec4 sampleColor = texture(uTexture, vUv);
                 if (sampleColor.a < 0.08)
                     discard;
-                fragColor = vec4(vColor * sampleColor.rgb, 1.0);
+                fragColor = vColor * sampleColor;
             }
             else
             {
-                fragColor = vec4(vColor, 1.0);
+                fragColor = vColor;
             }
         }
         """;
@@ -179,7 +184,10 @@ internal sealed partial class World3DGridOverlay : Overlay
     private readonly IClydeTileDefinitionManager _tileDefinitionManager;
     private readonly IClydeInternal _clyde;
     private readonly SharedPhysics3DSystem _physics3D;
+    private readonly SharedMapGrid3DSystem _mapGrid3D;
+    private readonly IResourceCache _resourceCache;
     private readonly List<float> _vertices = new(256 * 1024);
+    private readonly List<float> _transparentVertices = new(32 * 1024);
     private readonly List<float> _tileVertices = new(256 * 1024);
     private readonly HashSet<MapId> _renderMaps = new();
     private readonly List<RenderLight3D> _lights3D = new();
@@ -212,7 +220,9 @@ internal sealed partial class World3DGridOverlay : Overlay
         SharedMapSystem mapSystem,
         IClydeTileDefinitionManager tileDefinitionManager,
         IClydeInternal clyde,
-        SharedPhysics3DSystem physics3D)
+        SharedPhysics3DSystem physics3D,
+        SharedMapGrid3DSystem mapGrid3D,
+        IResourceCache resourceCache)
     {
         _entityManager = entityManager;
         _transformSystem = transformSystem;
@@ -221,6 +231,8 @@ internal sealed partial class World3DGridOverlay : Overlay
         _tileDefinitionManager = tileDefinitionManager;
         _clyde = clyde;
         _physics3D = physics3D;
+        _mapGrid3D = mapGrid3D;
+        _resourceCache = resourceCache;
         _diagnosticStage = ParseDiagnosticStage(Environment.GetEnvironmentVariable("SS14_3D_DIAGNOSTIC"));
         ZIndex = int.MaxValue;
 
@@ -266,8 +278,10 @@ internal sealed partial class World3DGridOverlay : Overlay
             return;
 
         _vertices.Clear();
+        _transparentVertices.Clear();
         _tileVertices.Clear();
         ClearSpriteBatches();
+        ClearModelBatches();
         CollectLights3D(args.MapId);
 
         // X/Y still follow the authoritative SS14 eye/transform. Base Z now comes from the real
@@ -339,7 +353,7 @@ internal sealed partial class World3DGridOverlay : Overlay
                 ref characterCount);
         }
 
-        var totalVertexCount = (_vertices.Count + _tileVertices.Count) / FloatsPerVertex;
+        var totalVertexCount = (_vertices.Count + _transparentVertices.Count + _tileVertices.Count) / FloatsPerVertex;
         if (!_reportedGeometry && totalVertexCount > 0)
         {
             var mapCount = _renderMaps.Count == 0 ? 1 : _renderMaps.Count + (renderedActiveMap ? 0 : 1);
@@ -377,12 +391,18 @@ internal sealed partial class World3DGridOverlay : Overlay
         var renderHandle = args.RenderHandle;
         var viewportSize = args.Viewport.Size;
         var solidVertexData = GetStageVertices(eyeWorld);
+        var transparentVertexData = _diagnosticStage == DiagnosticStage.Tiles
+            ? _transparentVertices.ToArray()
+            : Array.Empty<float>();
         var tileVertexData = _diagnosticStage == DiagnosticStage.Tiles
             ? _tileVertices.ToArray()
             : Array.Empty<float>();
         var spriteBatches = _diagnosticStage == DiagnosticStage.Tiles
             ? SnapshotSpriteBatches()
             : Array.Empty<SpriteBatch>();
+        var modelBatches = _diagnosticStage == DiagnosticStage.Tiles
+            ? SnapshotModelBatches()
+            : Array.Empty<ModelBatch>();
         var tileAtlasHandle = GetTileAtlasHandle();
 
         renderHandle.RenderInRenderTarget(
@@ -390,8 +410,10 @@ internal sealed partial class World3DGridOverlay : Overlay
             () => DrawPerspectivePass(
                 viewportSize,
                 solidVertexData,
+                transparentVertexData,
                 tileVertexData,
                 spriteBatches,
+                modelBatches,
                 tileAtlasHandle,
                 mvp,
                 _diagnosticStage),
@@ -401,8 +423,10 @@ internal sealed partial class World3DGridOverlay : Overlay
     private unsafe void DrawPerspectivePass(
         Vector2i viewportSize,
         float[] solidVertexData,
+        float[] transparentVertexData,
         float[] tileVertexData,
         SpriteBatch[] spriteBatches,
+        ModelBatch[] modelBatches,
         uint tileAtlasHandle,
         Matrix4x4 mvp,
         DiagnosticStage stage)
@@ -479,7 +503,17 @@ internal sealed partial class World3DGridOverlay : Overlay
             else
                 DrawVertexData(tileVertexData, false, 0);
 
+            DrawOpaqueModelBatches(modelBatches);
+
+            GL.Enable(EnableCap.Blend);
+            GL.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+            GL.DepthMask(false);
             DrawSpriteBatches(spriteBatches);
+            DrawTransparentModelBatches(modelBatches);
+            if (transparentVertexData.Length > 0)
+                DrawVertexData(transparentVertexData, false, 0);
+            GL.DepthMask(true);
+            GL.Disable(EnableCap.Blend);
 
             if (stage == DiagnosticStage.Tiles && _localPlayer is not null)
             {
@@ -571,9 +605,9 @@ internal sealed partial class World3DGridOverlay : Overlay
             case DiagnosticStage.ClipTriangle:
                 return
                 [
-                    -0.85f, -0.75f, 0f, 1f, 0.1f, 0.1f, 0f, 0f,
-                    0.85f, -0.75f, 0f, 0.1f, 1f, 0.1f, 0f, 0f,
-                    0f, 0.85f, 0f, 0.1f, 0.3f, 1f, 0f, 0f,
+                    -0.85f, -0.75f, 0f, 1f, 0.1f, 0.1f, 1f, 0f, 0f,
+                    0.85f, -0.75f, 0f, 0.1f, 1f, 0.1f, 1f, 0f, 0f,
+                    0f, 0.85f, 0f, 0.1f, 0.3f, 1f, 1f, 0f, 0f,
                 ];
             case DiagnosticStage.WorldQuad:
                 _vertices.Clear();
@@ -637,6 +671,8 @@ internal sealed partial class World3DGridOverlay : Overlay
             AppendGrid(grid, eyeWorld);
         }
 
+        AppendNative3DGrids(mapId, eyeWorld, ref gridCount);
+
         AppendEntities(
             mapId,
             eyeWorld,
@@ -647,6 +683,7 @@ internal sealed partial class World3DGridOverlay : Overlay
             out var mapMovingCount,
             out var mapCharacterCount);
 
+        AppendNative3DModels(mapId, eyeWorld, ref mapStaticCount, ref mapMovingCount);
         AppendNative3DEntities(mapId, eyeWorld, ref mapStaticCount, ref mapMovingCount);
 
         staticEntityCount += mapStaticCount;
@@ -670,6 +707,7 @@ internal sealed partial class World3DGridOverlay : Overlay
             if (transform.MapID != mapId ||
                 !transform3D.Authoritative ||
                 !primitive.Visible ||
+                _renderedMeshEntities.Contains(uid) ||
                 uid == _localPlayer ||
                 !SpatialMath.IsFinite(primitive.Size) ||
                 primitive.Size.X <= 0f ||
@@ -686,13 +724,12 @@ internal sealed partial class World3DGridOverlay : Overlay
                 continue;
             }
 
-            var color = new Vector3(primitive.Color.R, primitive.Color.G, primitive.Color.B);
             AddOrientedBox(
                 uid,
                 mapId,
                 _transform3DSystem.GetWorldMatrix3D(uid, transform),
                 primitive.Size,
-                color);
+                primitive.Color);
 
             if (_entityManager.TryGetComponent(uid, out PhysicsBody3DComponent? body) &&
                 body.BodyType != PhysicsBodyType3D.Static)
@@ -706,7 +743,7 @@ internal sealed partial class World3DGridOverlay : Overlay
         }
     }
 
-    private void AddOrientedBox(EntityUid entity, MapId mapId, Matrix4x4 worldMatrix, Vector3 size, Vector3 color)
+    private void AddOrientedBox(EntityUid entity, MapId mapId, Matrix4x4 worldMatrix, Vector3 size, Color color)
     {
         var half = size * 0.5f;
         Span<Vector3> corners = stackalloc Vector3[8]
@@ -724,12 +761,13 @@ internal sealed partial class World3DGridOverlay : Overlay
         for (var i = 0; i < corners.Length; i++)
             corners[i] = Vector3.Transform(corners[i], worldMatrix);
 
-        AddLitFace(entity, mapId, corners[0], corners[3], corners[2], corners[1], color);
-        AddLitFace(entity, mapId, corners[4], corners[5], corners[6], corners[7], color);
-        AddLitFace(entity, mapId, corners[0], corners[1], corners[5], corners[4], color);
-        AddLitFace(entity, mapId, corners[1], corners[2], corners[6], corners[5], color);
-        AddLitFace(entity, mapId, corners[2], corners[3], corners[7], corners[6], color);
-        AddLitFace(entity, mapId, corners[3], corners[0], corners[4], corners[7], color);
+        var albedo = new Vector4(color.R, color.G, color.B, color.A);
+        AddLitFace(entity, mapId, corners[0], corners[3], corners[2], corners[1], albedo);
+        AddLitFace(entity, mapId, corners[4], corners[5], corners[6], corners[7], albedo);
+        AddLitFace(entity, mapId, corners[0], corners[1], corners[5], corners[4], albedo);
+        AddLitFace(entity, mapId, corners[1], corners[2], corners[6], corners[5], albedo);
+        AddLitFace(entity, mapId, corners[2], corners[3], corners[7], corners[6], albedo);
+        AddLitFace(entity, mapId, corners[3], corners[0], corners[4], corners[7], albedo);
     }
 
     private void CollectLights3D(MapId activeMap)
@@ -785,11 +823,18 @@ internal sealed partial class World3DGridOverlay : Overlay
         Vector3 p1,
         Vector3 p2,
         Vector3 p3,
-        Vector3 albedo)
+        Vector4 albedo)
     {
         var normal = Vector3.Cross(p1 - p0, p2 - p0);
         normal = normal.LengthSquared() > 1e-6f ? Vector3.Normalize(normal) : Vector3.UnitZ;
         var center = (p0 + p1 + p2 + p3) * 0.25f;
+        var illumination = ShadeSurface3D(entity, mapId, center, normal);
+        var lit = Vector3.Min(Vector3.Multiply(new Vector3(albedo.X, albedo.Y, albedo.Z), illumination), Vector3.One);
+        AddFace(p0, p1, p2, p3, new Vector4(lit, albedo.W));
+    }
+
+    private Vector3 ShadeSurface3D(EntityUid entity, MapId mapId, Vector3 center, Vector3 normal)
+    {
         var illumination = new Vector3(0.13f) + new Vector3(0.16f * MathF.Max(Vector3.Dot(normal, Vector3.UnitZ), 0f));
 
         foreach (var light in _lights3D)
@@ -828,7 +873,7 @@ internal sealed partial class World3DGridOverlay : Overlay
             illumination += light.Color * (lambert * falloff * MathF.Max(light.Energy, 0f) * spot);
         }
 
-        AddFace(p0, p1, p2, p3, Vector3.Min(Vector3.Multiply(albedo, illumination), Vector3.One));
+        return illumination;
     }
 
     private static float GetSpotAttenuation3D(RenderLight3D light, Vector3 fromLight)
@@ -857,6 +902,12 @@ internal sealed partial class World3DGridOverlay : Overlay
         bool CastShadows);
 
     private void AddFace(Vector3 p0, Vector3 p1, Vector3 p2, Vector3 p3, Vector3 color)
+    {
+        AddTriangle(p0, p1, p2, color);
+        AddTriangle(p0, p2, p3, color);
+    }
+
+    private void AddFace(Vector3 p0, Vector3 p1, Vector3 p2, Vector3 p3, Vector4 color)
     {
         AddTriangle(p0, p1, p2, color);
         AddTriangle(p0, p2, p3, color);
@@ -1282,6 +1333,14 @@ internal sealed partial class World3DGridOverlay : Overlay
         AddVertex(c, color);
     }
 
+    private void AddTriangle(Vector3 a, Vector3 b, Vector3 c, Vector4 color)
+    {
+        var vertices = color.W < 0.999f ? _transparentVertices : _vertices;
+        AddVertex(vertices, a, color, Vector2.Zero);
+        AddVertex(vertices, b, color, Vector2.Zero);
+        AddVertex(vertices, c, color, Vector2.Zero);
+    }
+
     private void AddVertex(Vector3 position, Vector3 color)
     {
         AddVertex(_vertices, position, color, Vector2.Zero);
@@ -1289,12 +1348,18 @@ internal sealed partial class World3DGridOverlay : Overlay
 
     private static void AddVertex(List<float> vertices, Vector3 position, Vector3 color, Vector2 uv)
     {
+        AddVertex(vertices, position, new Vector4(color, 1f), uv);
+    }
+
+    private static void AddVertex(List<float> vertices, Vector3 position, Vector4 color, Vector2 uv)
+    {
         vertices.Add(position.X);
         vertices.Add(position.Y);
         vertices.Add(position.Z);
         vertices.Add(color.X);
         vertices.Add(color.Y);
         vertices.Add(color.Z);
+        vertices.Add(color.W);
         vertices.Add(uv.X);
         vertices.Add(uv.Y);
     }
@@ -1368,9 +1433,9 @@ internal sealed partial class World3DGridOverlay : Overlay
         const int stride = FloatsPerVertex * sizeof(float);
         GL.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, stride, 0);
         GL.EnableVertexAttribArray(0);
-        GL.VertexAttribPointer(1, 3, VertexAttribPointerType.Float, false, stride, 3 * sizeof(float));
+        GL.VertexAttribPointer(1, 4, VertexAttribPointerType.Float, false, stride, 3 * sizeof(float));
         GL.EnableVertexAttribArray(1);
-        GL.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, stride, 6 * sizeof(float));
+        GL.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, stride, 7 * sizeof(float));
         GL.EnableVertexAttribArray(2);
         GL.BindVertexArray(0);
 

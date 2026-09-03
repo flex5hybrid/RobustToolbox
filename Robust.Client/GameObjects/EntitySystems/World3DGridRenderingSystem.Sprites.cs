@@ -131,10 +131,11 @@ internal sealed partial class World3DGridOverlay
             var p2 = BillboardPoint(worldPosition, local2, baseHeight, billboardRight, towardCamera);
             var p3 = BillboardPoint(worldPosition, local3, baseHeight, billboardRight, towardCamera);
 
-            var color = new Vector3(
+            var color = new Vector4(
                 Math.Clamp(modulation.R, 0f, 1f),
                 Math.Clamp(modulation.G, 0f, 1f),
-                Math.Clamp(modulation.B, 0f, 1f));
+                Math.Clamp(modulation.B, 0f, 1f),
+                Math.Clamp(modulation.A, 0f, 1f));
 
             var uv0 = new Vector2(uvRegion.Left, uvRegion.Bottom);
             var uv1 = new Vector2(uvRegion.Right, uvRegion.Bottom);
