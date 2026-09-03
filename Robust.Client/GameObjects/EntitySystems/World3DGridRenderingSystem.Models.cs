@@ -100,7 +100,17 @@ internal sealed partial class World3DGridOverlay
             else if ((component.Mesh.EndsWith(".gltf", StringComparison.OrdinalIgnoreCase) ||
                       component.Mesh.EndsWith(".glb", StringComparison.OrdinalIgnoreCase)) &&
                      _resourceCache.TryGetResource<GltfMeshResource>(path, out var gltf))
-                surfaces = gltf.Surfaces;
+            {
+                if (_entityManager.TryGetComponent(uid, out AnimationPlayer3DComponent? animation) &&
+                    animation.Playing && !string.IsNullOrWhiteSpace(animation.Clip))
+                {
+                    var ticks = (long) _timing.CurTick.Value - animation.StartTick;
+                    var time = (float) (ticks / (double) Math.Max(_timing.TickRate, (ushort) 1) + _timing.TickRemainder.TotalSeconds);
+                    surfaces = gltf.Sample(animation.Clip, time * animation.PlaybackRate, animation.Loop);
+                }
+                else
+                    surfaces = gltf.Surfaces;
+            }
             else
                 return false;
         }
