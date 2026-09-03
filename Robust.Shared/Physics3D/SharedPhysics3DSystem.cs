@@ -21,7 +21,7 @@ namespace Robust.Shared.Physics3D;
 /// and this system; backend handles never cross the engine boundary and only explicitly predicted client bodies
 /// can write simulated poses back into Transform3D state.
 /// </summary>
-public sealed class SharedPhysics3DSystem : EntitySystem
+public sealed partial class SharedPhysics3DSystem : EntitySystem
 {
     public static readonly Vector3 DefaultGravity = new(0f, 0f, -14.5f);
     public const float FixedTimeStep = 1f / 60f;
@@ -52,6 +52,8 @@ public sealed class SharedPhysics3DSystem : EntitySystem
         SubscribeLocalEvent<Transform3DComponent, Transform3DStateAppliedEvent>(OnTransformStateApplied);
         SubscribeLocalEvent<PredictedPhysics3DComponent, ComponentStartup>(OnPredictionStartup);
         SubscribeLocalEvent<PredictedPhysics3DComponent, ComponentShutdown>(OnPredictionShutdown);
+        SubscribeLocalEvent<LegacyPhysics3DBridgeComponent, StartCollide3DEvent>(OnLegacyStartCollide3D);
+        SubscribeLocalEvent<LegacyPhysics3DBridgeComponent, EndCollide3DEvent>(OnLegacyEndCollide3D);
         SubscribeLocalEvent<PhysicsJoint3DComponent, ComponentStartup>(OnJointStartup);
         SubscribeLocalEvent<PhysicsJoint3DComponent, ComponentShutdown>(OnJointShutdown);
         SubscribeLocalEvent<MapRemovedEvent>(OnMapRemoved);
@@ -478,6 +480,8 @@ public sealed class SharedPhysics3DSystem : EntitySystem
                         var first = new StartCollide3DEvent(
                             contact.First,
                             contact.Second,
+                            contact.FirstShape,
+                            contact.SecondShape,
                             contact.Position,
                             contact.Normal,
                             contact.Penetration,
@@ -485,6 +489,8 @@ public sealed class SharedPhysics3DSystem : EntitySystem
                         var second = new StartCollide3DEvent(
                             contact.Second,
                             contact.First,
+                            contact.SecondShape,
+                            contact.FirstShape,
                             contact.Position,
                             -contact.Normal,
                             contact.Penetration,
@@ -500,6 +506,8 @@ public sealed class SharedPhysics3DSystem : EntitySystem
                         var first = new Collide3DEvent(
                             contact.First,
                             contact.Second,
+                            contact.FirstShape,
+                            contact.SecondShape,
                             contact.Position,
                             contact.Normal,
                             contact.Penetration,
@@ -507,6 +515,8 @@ public sealed class SharedPhysics3DSystem : EntitySystem
                         var second = new Collide3DEvent(
                             contact.Second,
                             contact.First,
+                            contact.SecondShape,
+                            contact.FirstShape,
                             contact.Position,
                             -contact.Normal,
                             contact.Penetration,
@@ -519,8 +529,8 @@ public sealed class SharedPhysics3DSystem : EntitySystem
                     }
                     case ContactTransitionKind3D.Ended:
                     {
-                        var first = new EndCollide3DEvent(contact.First, contact.Second, contact.Sensor);
-                        var second = new EndCollide3DEvent(contact.Second, contact.First, contact.Sensor);
+                        var first = new EndCollide3DEvent(contact.First, contact.Second, contact.FirstShape, contact.SecondShape, contact.Sensor);
+                        var second = new EndCollide3DEvent(contact.Second, contact.First, contact.SecondShape, contact.FirstShape, contact.Sensor);
                         if (firstExists)
                             RaiseLocalEvent(contact.First, ref first);
                         if (secondExists)
@@ -1778,7 +1788,7 @@ public sealed class SharedPhysics3DSystem : EntitySystem
 
     private sealed class CollisionPairFilterRegistry
     {
-        private readonly Dictionary<ContactPairKey3D, int> _disabled = new();
+        private readonly Dictionary<BodyPairKey3D, int> _disabled = new();
 
         public void Disable(uint first, uint second)
         {
@@ -1804,11 +1814,11 @@ public sealed class SharedPhysics3DSystem : EntitySystem
             return _disabled.ContainsKey(CreateKey(first.Packed, second.Packed));
         }
 
-        private static ContactPairKey3D CreateKey(uint first, uint second)
+        private static BodyPairKey3D CreateKey(uint first, uint second)
         {
             return first <= second
-                ? new ContactPairKey3D(first, second)
-                : new ContactPairKey3D(second, first);
+                ? new BodyPairKey3D(first, second)
+                : new BodyPairKey3D(second, first);
         }
     }
 
@@ -2063,7 +2073,8 @@ public sealed class SharedPhysics3DSystem : EntitySystem
         Ended,
     }
 
-    private readonly record struct ContactPairKey3D(uint First, uint Second);
+    private readonly record struct BodyPairKey3D(uint First, uint Second);
+    private readonly record struct ContactPairKey3D(uint First, uint Second, int FirstShape, int SecondShape);
     private readonly record struct ContactTransition3D(ContactTransitionKind3D Kind, PhysicsContact3D Contact);
 
     private sealed class ContactTracker3D
@@ -2154,6 +2165,8 @@ public sealed class SharedPhysics3DSystem : EntitySystem
             var contact = new PhysicsContact3D(
                 firstProperties.Entity,
                 secondProperties.Entity,
+                childIndexA,
+                childIndexB,
                 firstPose.Position + offset,
                 normal,
                 bestDepth,
@@ -2163,13 +2176,15 @@ public sealed class SharedPhysics3DSystem : EntitySystem
             var secondPacked = pair.B.Packed;
             ContactPairKey3D key;
             if (firstPacked <= secondPacked)
-                key = new ContactPairKey3D(firstPacked, secondPacked);
+                key = new ContactPairKey3D(firstPacked, secondPacked, childIndexA, childIndexB);
             else
             {
-                key = new ContactPairKey3D(secondPacked, firstPacked);
+                key = new ContactPairKey3D(secondPacked, firstPacked, childIndexB, childIndexA);
                 contact = new PhysicsContact3D(
                     contact.Second,
                     contact.First,
+                    contact.SecondShape,
+                    contact.FirstShape,
                     contact.Position,
                     -contact.Normal,
                     contact.Penetration,

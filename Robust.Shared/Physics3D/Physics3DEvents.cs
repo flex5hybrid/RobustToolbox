@@ -11,6 +11,8 @@ namespace Robust.Shared.Physics3D;
 public readonly record struct StartCollide3DEvent(
     EntityUid OurEntity,
     EntityUid OtherEntity,
+    int OurShape,
+    int OtherShape,
     Vector3 Position,
     Vector3 Normal,
     float Penetration,
@@ -23,6 +25,8 @@ public readonly record struct StartCollide3DEvent(
 public readonly record struct Collide3DEvent(
     EntityUid OurEntity,
     EntityUid OtherEntity,
+    int OurShape,
+    int OtherShape,
     Vector3 Position,
     Vector3 Normal,
     float Penetration,
@@ -35,4 +39,6 @@ public readonly record struct Collide3DEvent(
 public readonly record struct EndCollide3DEvent(
     EntityUid OurEntity,
     EntityUid OtherEntity,
+    int OurShape,
+    int OtherShape,
     bool Sensor);

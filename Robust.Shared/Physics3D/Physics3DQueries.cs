@@ -48,6 +48,8 @@ public readonly record struct PhysicsOverlap3D(
 public readonly record struct PhysicsContact3D(
     EntityUid First,
     EntityUid Second,
+    int FirstShape,
+    int SecondShape,
     Vector3 Position,
     Vector3 Normal,
     float Penetration,
