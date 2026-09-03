@@ -17,6 +17,7 @@ using Robust.Shared.Network.Messages;
 using Robust.Shared.Placement;
 using Robust.Shared.Player;
 using Robust.Shared.Prototypes;
+using Robust.Shared.Physics3D;
 
 namespace Robust.Server.Placement
 {
@@ -33,6 +34,9 @@ namespace Robust.Server.Placement
         private EntityLookupSystem _lookup => _entityManager.System<EntityLookupSystem>();
         private SharedMapSystem _maps => _entityManager.System<SharedMapSystem>();
         private SharedTransformSystem _xformSystem => _entityManager.System<SharedTransformSystem>();
+        private SharedTransform3DSystem _xform3D => _entityManager.System<SharedTransform3DSystem>();
+        private SharedPhysics3DSystem _physics3D => _entityManager.System<SharedPhysics3DSystem>();
+        private SharedMapGrid3DSystem _maps3D => _entityManager.System<SharedMapGrid3DSystem>();
 
         //TO-DO: Expand for multiple permission per mob?
         //       Add support for multi-use placeables (tiles etc.).
@@ -96,7 +100,10 @@ namespace Robust.Server.Placement
             var dirRcv = msg.DirRcv;
 
             var session = _playerManager.GetSessionByChannel(msg.MsgChannel);
-            var plyEntity = _entityManager.GetComponentOrNull<TransformComponent>(session.AttachedEntity);
+            if (session.AttachedEntity is not { Valid: true } placer)
+                return;
+
+            var plyEntity = _entityManager.GetComponentOrNull<TransformComponent>(placer);
 
             // Don't have an entity, don't get to place.
             if (plyEntity == null)
@@ -107,6 +114,16 @@ namespace Robust.Server.Placement
 
             var netCoordinates = msg.NetCoordinates;
             var coordinates = _entityManager.GetCoordinates(netCoordinates);
+            PhysicsRayHit3D? placementHit3D = null;
+            if (_entityManager.TryGetComponent(placer, out View3DComponent? view3D) && view3D.Enabled)
+            {
+                var permissionRange = GetPermission(placer, alignRcv)?.Range ?? 16;
+                if (!TryReconstructPlacement3D(placer, plyEntity, view3D, Math.Max(1, permissionRange), out coordinates, out var hit3D))
+                    return;
+
+                placementHit3D = hit3D;
+                dirRcv = new Angle(view3D.Yaw).GetCardinalDir();
+            }
 
             if (!coordinates.IsValid(_entityManager))
             {
@@ -172,17 +189,103 @@ namespace Robust.Server.Placement
                 }
 
                 var created = _entityManager.SpawnAttachedTo(entityTemplateName, coordinates, rotation: dirRcv.ToAngle());
+                if (placementHit3D is { } entityHit)
+                {
+                    var position3D = entityHit.Position + entityHit.Normal * 0.46f;
+                    PromotePlacedEntity3D(created, position3D, dirRcv.ToAngle());
+                }
 
                 var placementCreateEvent = new PlacementEntityEvent(created, coordinates, PlacementEventAction.Create, msg.MsgChannel.UserId);
                 _entityManager.EventBus.RaiseEvent(EventSource.Local, placementCreateEvent);
             }
             else
             {
+                if (placementHit3D is { } tileHit &&
+                    _entityManager.TryGetComponent(tileHit.Entity, out MapGrid3DComponent? grid3D))
+                {
+                    var sample = tileType == 0
+                        ? tileHit.Position - tileHit.Normal * 0.05f
+                        : tileHit.Position + tileHit.Normal * 0.05f;
+                    var cell = _maps3D.WorldToCell((tileHit.Entity, grid3D), sample);
+                    if (_maps3D.SetVoxel((tileHit.Entity, grid3D), cell, new Voxel3D(tileType)))
+                    {
+                        var placementEvent = new PlacementTileEvent(tileType, coordinates, msg.MsgChannel.UserId);
+                        _entityManager.EventBus.RaiseEvent(EventSource.Local, placementEvent);
+                    }
+
+                    return;
+                }
+
                 if (_tileDefinitionManager[tileType].AllowRotationMirror)
                     PlaceNewTile(tileType, coordinates, msg.MsgChannel.UserId, Tile.DirectionToByte(dirRcv), msg.Mirrored);
                 else
                     PlaceNewTile(tileType, coordinates, msg.MsgChannel.UserId, Tile.DirectionToByte(Direction.South), false);
             }
+        }
+
+        private bool TryReconstructPlacement3D(
+            EntityUid placer,
+            TransformComponent placerTransform,
+            View3DComponent view,
+            float range,
+            out EntityCoordinates coordinates,
+            out PhysicsRayHit3D hit)
+        {
+            coordinates = EntityCoordinates.Invalid;
+            hit = default;
+            var origin = _xform3D.GetWorldPosition3D(placer, placerTransform) + Vector3.UnitZ * view.EyeHeight;
+            var horizontal = MathF.Cos(view.Pitch);
+            var direction = Vector3.Normalize(new Vector3(
+                MathF.Sin(view.Yaw) * horizontal,
+                MathF.Cos(view.Yaw) * horizontal,
+                MathF.Sin(view.Pitch)));
+            if (!_physics3D.TryRayCast(
+                    placerTransform.MapID,
+                    new Ray3D(origin, direction),
+                    range,
+                    int.MaxValue,
+                    placer,
+                    false,
+                    out hit))
+            {
+                return false;
+            }
+
+            var mapPoint = new MapCoordinates(new Vector2(hit.Position.X, hit.Position.Y), placerTransform.MapID);
+            coordinates = _xformSystem.ToCoordinates(placerTransform.ParentUid, mapPoint);
+            return coordinates.IsValid(_entityManager);
+        }
+
+        private void PromotePlacedEntity3D(EntityUid entity, Vector3 position, Angle angle)
+        {
+            _xform3D.SetAuthoritative(entity, true);
+            _xform3D.SetWorldPosition3D(entity, position);
+            _xform3D.SetWorldRotation3D(entity, Quaternion.CreateFromAxisAngle(Vector3.UnitZ, (float) angle.Theta));
+
+            var body = _entityManager.EnsureComponent<PhysicsBody3DComponent>(entity);
+            body.BodyType = PhysicsBodyType3D.Static;
+            body.GravityScale = 0f;
+            body.CanCollide = true;
+
+            var collider = _entityManager.EnsureComponent<Collider3DComponent>(entity);
+            if (collider.Shapes.Count == 0)
+            {
+                collider.Shapes.Add(new BoxShape3D
+                {
+                    Size = new Vector3(0.9f),
+                    CollisionLayer = int.MaxValue,
+                    CollisionMask = int.MaxValue,
+                    Friction = 0.75f,
+                });
+            }
+
+            var primitive = _entityManager.EnsureComponent<Primitive3DComponent>(entity);
+            primitive.Size = new Vector3(0.9f);
+            primitive.Color = new Color(0.48f, 0.55f, 0.62f);
+            body.Dirty(_entityManager);
+            collider.Dirty(_entityManager);
+            primitive.Dirty(_entityManager);
+            _physics3D.RefreshBody(entity);
         }
 
         private void PlaceNewTile(int tileType, EntityCoordinates coordinates, NetUserId placingUserId, byte direction, bool mirrored)
