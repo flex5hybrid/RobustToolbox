@@ -58,7 +58,7 @@ public sealed class SharedTransform3DSystem : EntitySystem
             transform3D.LocalRotation3D = NormalizeOrIdentity(
                 Quaternion.Concatenate(legacyYaw, transform3D.LocalRotation3D));
         }
-        else
+        else if (transform.ParentUid.IsValid())
         {
             _transform.SetLocalPosition(uid, new Vector2(
                 transform3D.LocalPosition3D.X,
@@ -173,6 +173,15 @@ public sealed class SharedTransform3DSystem : EntitySystem
         if (!IsFinite(position) || !_transformQuery.Resolve(uid, ref transform, false))
             return;
 
+        if (!transform.ParentUid.IsValid())
+        {
+            if (IsAuthoritative(uid))
+                SetLocalPositionCore(uid, position);
+            else
+                SetLocalZ(uid, position.Z);
+            return;
+        }
+
         if (!IsAuthoritative(uid))
         {
             _transform.SetWorldPosition(uid, new Vector2(position.X, position.Y));
@@ -205,12 +214,16 @@ public sealed class SharedTransform3DSystem : EntitySystem
 
         if (!IsAuthoritative(uid))
         {
-            _transform.SetLocalPosition(uid, new Vector2(position.X, position.Y), transform);
+            if (transform.ParentUid.IsValid())
+                _transform.SetLocalPosition(uid, new Vector2(position.X, position.Y), transform);
             SetLocalZ(uid, position.Z);
             return;
         }
 
         SetLocalPositionCore(uid, position);
+
+        if (!transform.ParentUid.IsValid())
+            return;
 
         // Derived legacy projection only. The authoritative value above remains untouched if the projection
         // cannot represent parent pitch, roll or Z.
@@ -258,8 +271,12 @@ public sealed class SharedTransform3DSystem : EntitySystem
         var rotationEvent = new Transform3DRotationChangedEvent(oldRotation, rotation);
         RaiseLocalEvent(uid, ref rotationEvent);
 
-        if (transform3D.Authoritative && _transformQuery.TryGetComponent(uid, out var transform))
+        if (transform3D.Authoritative &&
+            _transformQuery.TryGetComponent(uid, out var transform) &&
+            transform.ParentUid.IsValid())
+        {
             _transform.SetLocalRotation(uid, GetYaw(rotation), transform);
+        }
     }
 
     public void SetWorldRotation3D(EntityUid uid, Quaternion rotation, TransformComponent? transform = null)
@@ -272,6 +289,14 @@ public sealed class SharedTransform3DSystem : EntitySystem
         }
 
         rotation = Quaternion.Normalize(rotation);
+
+        if (!transform.ParentUid.IsValid())
+        {
+            if (IsAuthoritative(uid))
+                SetRotation3D(uid, rotation);
+            return;
+        }
+
         if (!IsAuthoritative(uid))
         {
             _transform.SetWorldRotation(uid, GetYaw(rotation));
