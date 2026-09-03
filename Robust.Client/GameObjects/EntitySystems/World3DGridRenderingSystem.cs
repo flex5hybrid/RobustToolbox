@@ -33,6 +33,7 @@ public sealed partial class World3DGridRenderingSystem : EntitySystem
     [Dependency] private IClydeTileDefinitionManager _tileDefinitionManager = default!;
     [Dependency] private IClydeInternal _clyde = default!;
     [Dependency] private IPlayerManager _playerManager = default!;
+    [Dependency] private SharedPhysics3DSystem _physics3D = default!;
 
     private World3DGridOverlay? _overlay;
     private EntityUid? _presentationEntity;
@@ -49,7 +50,8 @@ public sealed partial class World3DGridRenderingSystem : EntitySystem
             _transform3DSystem,
             _mapSystem,
             _tileDefinitionManager,
-            _clyde);
+            _clyde,
+            _physics3D);
         _overlayManager.AddOverlay(_overlay);
     }
 
@@ -176,9 +178,11 @@ internal sealed partial class World3DGridOverlay : Overlay
     private readonly SharedMapSystem _mapSystem;
     private readonly IClydeTileDefinitionManager _tileDefinitionManager;
     private readonly IClydeInternal _clyde;
+    private readonly SharedPhysics3DSystem _physics3D;
     private readonly List<float> _vertices = new(256 * 1024);
     private readonly List<float> _tileVertices = new(256 * 1024);
     private readonly HashSet<MapId> _renderMaps = new();
+    private readonly List<RenderLight3D> _lights3D = new();
 
     private uint _vertexArray;
     private uint _vertexBuffer;
@@ -207,7 +211,8 @@ internal sealed partial class World3DGridOverlay : Overlay
         SharedTransform3DSystem transform3DSystem,
         SharedMapSystem mapSystem,
         IClydeTileDefinitionManager tileDefinitionManager,
-        IClydeInternal clyde)
+        IClydeInternal clyde,
+        SharedPhysics3DSystem physics3D)
     {
         _entityManager = entityManager;
         _transformSystem = transformSystem;
@@ -215,6 +220,7 @@ internal sealed partial class World3DGridOverlay : Overlay
         _mapSystem = mapSystem;
         _tileDefinitionManager = tileDefinitionManager;
         _clyde = clyde;
+        _physics3D = physics3D;
         _diagnosticStage = ParseDiagnosticStage(Environment.GetEnvironmentVariable("SS14_3D_DIAGNOSTIC"));
         ZIndex = int.MaxValue;
 
@@ -262,6 +268,7 @@ internal sealed partial class World3DGridOverlay : Overlay
         _vertices.Clear();
         _tileVertices.Clear();
         ClearSpriteBatches();
+        CollectLights3D(args.MapId);
 
         // X/Y still follow the authoritative SS14 eye/transform. Base Z now comes from the real
         // Transform3D hierarchy, so the camera automatically follows a grid/deck when it receives height.
@@ -680,7 +687,12 @@ internal sealed partial class World3DGridOverlay : Overlay
             }
 
             var color = new Vector3(primitive.Color.R, primitive.Color.G, primitive.Color.B);
-            AddOrientedBox(_transform3DSystem.GetWorldMatrix3D(uid, transform), primitive.Size, color);
+            AddOrientedBox(
+                uid,
+                mapId,
+                _transform3DSystem.GetWorldMatrix3D(uid, transform),
+                primitive.Size,
+                color);
 
             if (_entityManager.TryGetComponent(uid, out PhysicsBody3DComponent? body) &&
                 body.BodyType != PhysicsBodyType3D.Static)
@@ -694,7 +706,7 @@ internal sealed partial class World3DGridOverlay : Overlay
         }
     }
 
-    private void AddOrientedBox(Matrix4x4 worldMatrix, Vector3 size, Vector3 color)
+    private void AddOrientedBox(EntityUid entity, MapId mapId, Matrix4x4 worldMatrix, Vector3 size, Vector3 color)
     {
         var half = size * 0.5f;
         Span<Vector3> corners = stackalloc Vector3[8]
@@ -712,13 +724,137 @@ internal sealed partial class World3DGridOverlay : Overlay
         for (var i = 0; i < corners.Length; i++)
             corners[i] = Vector3.Transform(corners[i], worldMatrix);
 
-        AddFace(corners[0], corners[3], corners[2], corners[1], color * 0.48f);
-        AddFace(corners[4], corners[5], corners[6], corners[7], Lighten(color, 1.18f));
-        AddFace(corners[0], corners[1], corners[5], corners[4], color * 0.66f);
-        AddFace(corners[1], corners[2], corners[6], corners[5], color * 0.76f);
-        AddFace(corners[2], corners[3], corners[7], corners[6], color * 0.86f);
-        AddFace(corners[3], corners[0], corners[4], corners[7], color * 0.72f);
+        AddLitFace(entity, mapId, corners[0], corners[3], corners[2], corners[1], color);
+        AddLitFace(entity, mapId, corners[4], corners[5], corners[6], corners[7], color);
+        AddLitFace(entity, mapId, corners[0], corners[1], corners[5], corners[4], color);
+        AddLitFace(entity, mapId, corners[1], corners[2], corners[6], corners[5], color);
+        AddLitFace(entity, mapId, corners[2], corners[3], corners[7], corners[6], color);
+        AddLitFace(entity, mapId, corners[3], corners[0], corners[4], corners[7], color);
     }
+
+    private void CollectLights3D(MapId activeMap)
+    {
+        _lights3D.Clear();
+        var query = _entityManager.AllEntityQueryEnumerator<TransformComponent, Transform3DComponent, PointLightComponent>();
+        while (query.MoveNext(out var uid, out var transform, out var transform3D, out var light))
+        {
+            if (!transform3D.IsAuthoritative ||
+                !light.Enabled ||
+                light.ContainerOccluded ||
+                light.Radius <= 0f ||
+                (transform.MapID != activeMap && !_renderMaps.Contains(transform.MapID)))
+                continue;
+
+            var worldRotation = _transform3DSystem.GetWorldRotation3D(uid, transform);
+            var position = _transform3DSystem.GetWorldPosition3D(uid, transform) +
+                           Vector3.Transform(new Vector3(light.Offset, 0f), worldRotation);
+            var kind = LightKind3D.Point;
+            var direction = Vector3.UnitY;
+            var innerCone = 22f;
+            var outerCone = 35f;
+            if (_entityManager.TryGetComponent(uid, out PointLight3DComponent? light3D))
+            {
+                kind = light3D.Kind;
+                position += Vector3.Transform(light3D.Offset, worldRotation);
+                direction = Vector3.Transform(light3D.Direction, worldRotation);
+                innerCone = light3D.InnerConeDegrees;
+                outerCone = light3D.OuterConeDegrees;
+            }
+
+            direction = direction.LengthSquared() > 1e-6f ? Vector3.Normalize(direction) : Vector3.UnitY;
+            _lights3D.Add(new RenderLight3D(
+                uid,
+                transform.MapID,
+                position,
+                direction,
+                new Vector3(light.Color.R, light.Color.G, light.Color.B),
+                light.Radius,
+                light.Energy,
+                light.Falloff,
+                kind,
+                innerCone,
+                outerCone,
+                light.CastShadows));
+        }
+    }
+
+    private void AddLitFace(
+        EntityUid entity,
+        MapId mapId,
+        Vector3 p0,
+        Vector3 p1,
+        Vector3 p2,
+        Vector3 p3,
+        Vector3 albedo)
+    {
+        var normal = Vector3.Cross(p1 - p0, p2 - p0);
+        normal = normal.LengthSquared() > 1e-6f ? Vector3.Normalize(normal) : Vector3.UnitZ;
+        var center = (p0 + p1 + p2 + p3) * 0.25f;
+        var illumination = new Vector3(0.13f) + new Vector3(0.16f * MathF.Max(Vector3.Dot(normal, Vector3.UnitZ), 0f));
+
+        foreach (var light in _lights3D)
+        {
+            if (light.MapId != mapId)
+                continue;
+
+            var toLight = light.Position - center;
+            var distanceSquared = toLight.LengthSquared();
+            if (distanceSquared < 1e-6f || distanceSquared >= light.Radius * light.Radius)
+                continue;
+
+            var distance = MathF.Sqrt(distanceSquared);
+            var lightDirection = toLight / distance;
+            var lambert = MathF.Max(Vector3.Dot(normal, lightDirection), 0f);
+            if (lambert <= 0f)
+                continue;
+
+            var spot = GetSpotAttenuation3D(light, -lightDirection);
+            if (spot <= 0f)
+                continue;
+
+            if (light.CastShadows &&
+                _physics3D.TryRayCast(
+                    mapId,
+                    new Ray3D(center + normal * 0.015f, lightDirection),
+                    MathF.Max(distance - 0.03f, 0.01f),
+                    int.MaxValue,
+                    entity,
+                    false,
+                    out _))
+                continue;
+
+            var normalizedDistance = distance / light.Radius;
+            var falloff = MathF.Pow(MathF.Max(1f - normalizedDistance, 0f), MathF.Max(light.Falloff * 0.35f, 1f));
+            illumination += light.Color * (lambert * falloff * MathF.Max(light.Energy, 0f) * spot);
+        }
+
+        AddFace(p0, p1, p2, p3, Vector3.Min(Vector3.Multiply(albedo, illumination), Vector3.One));
+    }
+
+    private static float GetSpotAttenuation3D(RenderLight3D light, Vector3 fromLight)
+    {
+        if (light.Kind != LightKind3D.Spot)
+            return 1f;
+
+        var cosine = Vector3.Dot(light.Direction, fromLight);
+        var inner = MathF.Cos(Math.Clamp(light.InnerConeDegrees, 0f, 179f) * MathF.PI / 180f);
+        var outer = MathF.Cos(Math.Clamp(light.OuterConeDegrees, light.InnerConeDegrees, 179f) * MathF.PI / 180f);
+        return Math.Clamp((cosine - outer) / MathF.Max(inner - outer, 0.0001f), 0f, 1f);
+    }
+
+    private readonly record struct RenderLight3D(
+        EntityUid Entity,
+        MapId MapId,
+        Vector3 Position,
+        Vector3 Direction,
+        Vector3 Color,
+        float Radius,
+        float Energy,
+        float Falloff,
+        LightKind3D Kind,
+        float InnerConeDegrees,
+        float OuterConeDegrees,
+        bool CastShadows);
 
     private void AddFace(Vector3 p0, Vector3 p1, Vector3 p2, Vector3 p3, Vector3 color)
     {
