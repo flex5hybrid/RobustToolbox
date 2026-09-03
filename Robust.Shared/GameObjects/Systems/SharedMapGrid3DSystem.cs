@@ -93,6 +93,74 @@ public sealed class SharedMapGrid3DSystem : EntitySystem
         return true;
     }
 
+    /// <summary>
+    /// Applies a bulk edit with one bounds rebuild, dirty mark, and chunk notification per affected chunk.
+    /// Individual voxel events are preserved so gameplay consumers observe the same semantic changes.
+    /// </summary>
+    public int SetVoxels(
+        Entity<MapGrid3DComponent?> grid,
+        IEnumerable<(Vector3i Indices, Voxel3D Voxel)> edits)
+    {
+        if (!Resolve(grid, ref grid.Comp, false))
+            return 0;
+
+        ValidateGrid(grid.Comp);
+        var changed = new List<(Vector3i Indices, Voxel3D OldVoxel, Voxel3D NewVoxel)>();
+        var changedChunks = new HashSet<Vector3i>();
+        foreach (var (indices, voxel) in edits)
+        {
+            var chunkIndices = CellToChunk(indices, grid.Comp.ChunkSize);
+            if (!grid.Comp.Chunks.TryGetValue(chunkIndices, out var chunk))
+            {
+                if (voxel.IsEmpty)
+                    continue;
+                chunk = new Voxel3D[GetChunkVolume(grid.Comp.ChunkSize)];
+                grid.Comp.Chunks.Add(chunkIndices, chunk);
+            }
+
+            var local = CellToChunkLocal(indices, grid.Comp.ChunkSize);
+            var flat = Flatten(local, grid.Comp.ChunkSize);
+            var oldVoxel = chunk[flat];
+            if (oldVoxel == voxel)
+                continue;
+            chunk[flat] = voxel;
+            changed.Add((indices, oldVoxel, voxel));
+            changedChunks.Add(chunkIndices);
+        }
+
+        if (changed.Count == 0)
+            return 0;
+
+        var tick = _timing.CurTick;
+        grid.Comp.LastVoxelModifiedTick = tick;
+        foreach (var chunkIndices in changedChunks)
+        {
+            var deleted = grid.Comp.Chunks.TryGetValue(chunkIndices, out var chunk) && IsEmpty(chunk);
+            if (deleted)
+            {
+                grid.Comp.Chunks.Remove(chunkIndices);
+                grid.Comp.ChunkModifiedTicks.Remove(chunkIndices);
+                grid.Comp.ChunkDeletionHistory.Add((tick, chunkIndices));
+            }
+            else
+                grid.Comp.ChunkModifiedTicks[chunkIndices] = tick;
+        }
+
+        RegenerateBounds(grid.Comp);
+        Dirty(grid.Owner, grid.Comp);
+        foreach (var (indices, oldVoxel, newVoxel) in changed)
+        {
+            var voxelEvent = new VoxelChanged3DEvent(grid.Owner, indices, oldVoxel, newVoxel);
+            RaiseLocalEvent(grid.Owner, ref voxelEvent, true);
+        }
+        foreach (var chunkIndices in changedChunks)
+        {
+            var chunkEvent = new GridChunkChanged3DEvent(grid.Owner, chunkIndices, !grid.Comp.Chunks.ContainsKey(chunkIndices));
+            RaiseLocalEvent(grid.Owner, ref chunkEvent, true);
+        }
+        return changed.Count;
+    }
+
     public IEnumerable<(Vector3i Indices, Voxel3D Voxel)> GetVoxels(
         Entity<MapGrid3DComponent?> grid,
         Vector3i min,

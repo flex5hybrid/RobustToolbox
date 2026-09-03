@@ -675,6 +675,8 @@ internal sealed partial class World3DGridOverlay : Overlay
 
         foreach (var grid in _mapSystem.GetAllGrids(mapId))
         {
+            if (_entityManager.HasComponent<MapGrid3DComponent>(grid.Owner))
+                continue;
             gridCount++;
             AppendGrid(grid, eyeWorld);
         }

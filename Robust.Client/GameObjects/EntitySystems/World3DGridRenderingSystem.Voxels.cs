@@ -57,20 +57,42 @@ internal sealed partial class World3DGridOverlay
         for (var i = 0; i < corners.Length; i++)
             corners[i] = Vector3.Transform(corners[i], worldMatrix);
 
-        var baseColor = VoxelColor(voxel);
-        var albedo = new Vector4(baseColor, 1f);
         if (_mapGrid3D.GetVoxel((gridUid, grid), indices + Vector3i.Down).IsEmpty)
-            AddLitFace(gridUid, mapId, corners[0], corners[3], corners[2], corners[1], albedo);
+            AddTexturedVoxelFace(gridUid, mapId, corners[0], corners[3], corners[2], corners[1], voxel);
         if (_mapGrid3D.GetVoxel((gridUid, grid), indices + Vector3i.Up).IsEmpty)
-            AddLitFace(gridUid, mapId, corners[4], corners[5], corners[6], corners[7], albedo);
+            AddTexturedVoxelFace(gridUid, mapId, corners[4], corners[5], corners[6], corners[7], voxel);
         if (_mapGrid3D.GetVoxel((gridUid, grid), indices + Vector3i.South).IsEmpty)
-            AddLitFace(gridUid, mapId, corners[0], corners[1], corners[5], corners[4], albedo);
+            AddTexturedVoxelFace(gridUid, mapId, corners[0], corners[1], corners[5], corners[4], voxel);
         if (_mapGrid3D.GetVoxel((gridUid, grid), indices + Vector3i.East).IsEmpty)
-            AddLitFace(gridUid, mapId, corners[1], corners[2], corners[6], corners[5], albedo);
+            AddTexturedVoxelFace(gridUid, mapId, corners[1], corners[2], corners[6], corners[5], voxel);
         if (_mapGrid3D.GetVoxel((gridUid, grid), indices + Vector3i.North).IsEmpty)
-            AddLitFace(gridUid, mapId, corners[2], corners[3], corners[7], corners[6], albedo);
+            AddTexturedVoxelFace(gridUid, mapId, corners[2], corners[3], corners[7], corners[6], voxel);
         if (_mapGrid3D.GetVoxel((gridUid, grid), indices + Vector3i.West).IsEmpty)
-            AddLitFace(gridUid, mapId, corners[3], corners[0], corners[4], corners[7], albedo);
+            AddTexturedVoxelFace(gridUid, mapId, corners[3], corners[0], corners[4], corners[7], voxel);
+    }
+
+    private void AddTexturedVoxelFace(
+        EntityUid gridUid,
+        MapId mapId,
+        Vector3 p0,
+        Vector3 p1,
+        Vector3 p2,
+        Vector3 p3,
+        Voxel3D voxel)
+    {
+        var tile = new Tile(voxel.TypeId, variant: voxel.Variant, rotationMirroring: (byte) (voxel.Orientation % 8));
+        var regions = _tileDefinitionManager.TileAtlasRegion(tile);
+        var region = regions is not null && tile.Variant < regions.Length
+            ? regions[tile.Variant]
+            : _tileDefinitionManager.ErrorTileRegion;
+        GetTileUvs(region, tile.RotationMirroring, out var uv0, out var uv1, out var uv2, out var uv3);
+
+        var normal = Vector3.Cross(p1 - p0, p2 - p0);
+        normal = normal.LengthSquared() > 1e-8f ? Vector3.Normalize(normal) : Vector3.UnitZ;
+        var illumination = ShadeSurface3D(gridUid, mapId, (p0 + p1 + p2 + p3) * 0.25f, normal);
+        var color = Vector3.Min(Vector3.Multiply(VoxelColor(voxel), illumination), Vector3.One);
+        AddTexturedTriangle(p0, p1, p2, uv0, uv1, uv2, color);
+        AddTexturedTriangle(p0, p2, p3, uv0, uv2, uv3, color);
     }
 
     private static Vector3 VoxelColor(Voxel3D voxel)
