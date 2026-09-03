@@ -576,6 +576,11 @@ public partial class SharedPhysicsSystem
         if (!PhysicsQuery.Resolve(uid, ref body))
             return false;
 
+        // Native 3D bodies must never be inserted back into the planar solver. The legacy component remains
+        // temporarily available to unmigrated gameplay code, but BEPU and Transform3D are the sole authority.
+        if (value && _transform3DQuery.TryGetComponent(uid, out var transform3D) && transform3D.IsAuthoritative)
+            return false;
+
         if (body.CanCollide == value)
             return value;
 

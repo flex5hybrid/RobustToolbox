@@ -71,6 +71,7 @@ namespace Robust.Shared.Physics.Systems
         protected EntityQuery<MapComponent> MapQuery;
         protected EntityQuery<PhysicsComponent> PhysicsQuery;
         protected EntityQuery<TransformComponent> XformQuery;
+        private EntityQuery<Transform3DComponent> _transform3DQuery;
 
         private ComponentRegistration _physicsReg = default!;
         private byte _angularVelocityIndex;
@@ -80,6 +81,7 @@ namespace Robust.Shared.Physics.Systems
             base.Initialize();
 
             _physicsReg = EntityManager.ComponentFactory.GetRegistration(CompIdx.Index<PhysicsComponent>());
+            _transform3DQuery = GetEntityQuery<Transform3DComponent>();
 
             // TODO PHYSICS STATE
             // Consider condensing the possible fields into just Linear velocity, angular velocity, and "Other"

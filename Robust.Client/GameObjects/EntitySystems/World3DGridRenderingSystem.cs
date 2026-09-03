@@ -1001,9 +1001,11 @@ internal sealed partial class World3DGridOverlay : Overlay
 
         while (query.MoveNext(out var uid, out var xform, out var body, out var fixtures, out var sprite))
         {
+            var nativeBody = _entityManager.TryGetComponent(uid, out Transform3DComponent? nativeTransform) &&
+                             nativeTransform.IsAuthoritative &&
+                             _entityManager.HasComponent<PhysicsBody3DComponent>(uid);
             if (xform.MapID != mapId ||
-                !body.CanCollide ||
-                !body.Hard ||
+                (!nativeBody && (!body.CanCollide || !body.Hard)) ||
                 !sprite._visible ||
                 (sprite._containerOccluded && !sprite.OverrideContainerOcclusion) ||
                 _entityManager.HasComponent<MapGridComponent>(uid))
