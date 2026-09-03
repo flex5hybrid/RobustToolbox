@@ -65,6 +65,7 @@ public sealed class SharedPhysics3DSystem : EntitySystem
         FlushPending();
         RefreshJoints();
         FlushPendingJoints();
+        SynchronizeTransformDrivenBodies();
 
         _accumulator += Math.Clamp(frameTime, 0f, FixedTimeStep * MaximumCatchUpSteps);
         var steps = 0;
@@ -1286,6 +1287,7 @@ public sealed class SharedPhysics3DSystem : EntitySystem
         {
             if (registration.IsStatic ||
                 !TryComp(uid, out PhysicsBody3DComponent? body) ||
+                body.BodyType == PhysicsBodyType3D.Kinematic ||
                 (!_network.IsServer && !HasComp<PredictedPhysics3DComponent>(uid)) ||
                 !_worlds.TryGetValue(registration.MapId, out var world))
             {
@@ -1307,6 +1309,43 @@ public sealed class SharedPhysics3DSystem : EntitySystem
                 body.AngularVelocity = angularVelocity;
                 Dirty(uid, body);
             }
+        }
+    }
+
+    /// <summary>
+    /// Static and kinematic bodies are driven by the transform hierarchy. This is what makes collision attached to
+    /// moving grids, vehicles, doors and seats follow their 3D parent instead of being frozen at creation time.
+    /// </summary>
+    private void SynchronizeTransformDrivenBodies()
+    {
+        foreach (var (uid, registration) in _registrations)
+        {
+            if (!TryComp(uid, out PhysicsBody3DComponent? body) ||
+                body.BodyType is not (PhysicsBodyType3D.Static or PhysicsBodyType3D.Kinematic) ||
+                !TryComp(uid, out TransformComponent? transform) ||
+                !_worlds.TryGetValue(registration.MapId, out var world))
+            {
+                continue;
+            }
+
+            var entityPosition = _transform3D.GetWorldPosition3D(uid, transform);
+            var entityRotation = _transform3D.GetWorldRotation3D(uid, transform);
+            var physicsPosition = entityPosition + entityRotation.Rotate(registration.ShapeOffset);
+            var physicsRotation = SpatialMath.Compose(registration.ShapeRotation, entityRotation);
+            if (registration.IsStatic)
+            {
+                var reference = world.Simulation.Statics[registration.StaticHandle];
+                reference.Pose = new RigidPose(physicsPosition, physicsRotation);
+                reference.UpdateBounds();
+                continue;
+            }
+
+            var bodyReference = world.Simulation.Bodies[registration.BodyHandle];
+            bodyReference.Pose = new RigidPose(physicsPosition, physicsRotation);
+            bodyReference.Velocity.Linear = body.LinearVelocity;
+            bodyReference.Velocity.Angular = body.AngularVelocity;
+            bodyReference.UpdateBounds();
+            bodyReference.Awake = true;
         }
     }
 
