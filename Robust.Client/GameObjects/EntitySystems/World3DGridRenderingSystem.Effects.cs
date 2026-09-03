@@ -11,6 +11,10 @@ namespace Robust.Client.GameObjects;
 
 internal sealed partial class World3DGridOverlay
 {
+    private readonly Dictionary<MapId, List<LegacySpriteRender3D>> _legacySpriteCache = new();
+    private TimeSpan _legacySpriteCacheTime = TimeSpan.MinValue;
+    private Vector2 _legacySpriteCacheEye;
+
     private void AppendNative3DVisualEffects(MapId mapId, Vector2 eyeWorld, Vector2 billboardRight, Vector2 billboardForward)
     {
         AppendLegacySpriteEntities(mapId, eyeWorld, billboardRight, billboardForward);
@@ -19,17 +23,47 @@ internal sealed partial class World3DGridOverlay
     }
 
     /// <summary>
-    /// Keeps ordinary SS14 visual entities visible during the 2D-to-3D migration. The main entity pass owns
-    /// collidable Physics+Fixtures sprites, while this pass handles decoration, lamps, signs and other sprites
-    /// that intentionally have no physics body. Native meshes/primitives are excluded to avoid drawing them twice.
+    /// Keeps ordinary SS14 visual entities visible during the 2D-to-3D migration. Build the legacy sprite list
+    /// once per rendered frame and bucket it by map so stacked Z-levels do not rescan every SpriteComponent for
+    /// every legacy MapId.
     /// </summary>
     private void AppendLegacySpriteEntities(MapId mapId, Vector2 eyeWorld, Vector2 billboardRight, Vector2 billboardForward)
     {
+        EnsureLegacySpriteCache(eyeWorld);
+        if (!_legacySpriteCache.TryGetValue(mapId, out var sprites))
+            return;
+
         var eyeRotation = new Angle(-_firstPersonYaw);
+        foreach (var entry in sprites)
+        {
+            TryAppendSpriteBillboard(
+                entry.Sprite,
+                entry.WorldRotation,
+                eyeRotation,
+                entry.Position,
+                billboardRight,
+                billboardForward);
+        }
+    }
+
+    private void EnsureLegacySpriteCache(Vector2 eyeWorld)
+    {
+        var now = _timing.CurTime;
+        if (_legacySpriteCacheTime == now &&
+            Vector2.DistanceSquared(_legacySpriteCacheEye, eyeWorld) < 0.0001f)
+        {
+            return;
+        }
+
+        _legacySpriteCacheTime = now;
+        _legacySpriteCacheEye = eyeWorld;
+        foreach (var list in _legacySpriteCache.Values)
+            list.Clear();
+
         var query = _entityManager.AllEntityQueryEnumerator<TransformComponent, SpriteComponent>();
         while (query.MoveNext(out var uid, out var transform, out var sprite))
         {
-            if (transform.MapID != mapId ||
+            if (transform.MapID == MapId.Nullspace ||
                 uid == _localPlayer ||
                 !sprite._visible ||
                 (sprite._containerOccluded && !sprite.OverrideContainerOcclusion) ||
@@ -50,13 +84,13 @@ internal sealed partial class World3DGridOverlay
             }
 
             var (_, worldRotation) = _transformSystem.GetWorldPositionRotation(transform);
-            TryAppendSpriteBillboard(
-                sprite,
-                worldRotation,
-                eyeRotation,
-                worldPosition3D,
-                billboardRight,
-                billboardForward);
+            if (!_legacySpriteCache.TryGetValue(transform.MapID, out var sprites))
+            {
+                sprites = new List<LegacySpriteRender3D>(128);
+                _legacySpriteCache.Add(transform.MapID, sprites);
+            }
+
+            sprites.Add(new LegacySpriteRender3D(sprite, worldRotation, worldPosition3D));
         }
     }
 
@@ -165,4 +199,9 @@ internal sealed partial class World3DGridOverlay
         value ^= value >> 16;
         return (value & 0x00FFFFFFu) / 16777215f;
     }
+
+    private readonly record struct LegacySpriteRender3D(
+        SpriteComponent Sprite,
+        Angle WorldRotation,
+        Vector3 Position);
 }

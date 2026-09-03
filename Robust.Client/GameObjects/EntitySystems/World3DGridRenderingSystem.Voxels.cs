@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Numerics;
 using Robust.Shared.GameObjects;
 using Robust.Shared.Map;
@@ -10,9 +11,14 @@ namespace Robust.Client.GameObjects;
 
 internal sealed partial class World3DGridOverlay
 {
+    private const int MaxLegacyLightsPerMap = 48;
+    private readonly Dictionary<MapId, List<RenderLight3D>> _legacyLightCache = new();
+    private TimeSpan _legacyLightCacheTime = TimeSpan.MinValue;
+    private Vector2 _legacyLightCacheEye;
+
     private void AppendNative3DGrids(MapId mapId, Vector2 eyeWorld, ref int gridCount)
     {
-        AppendLegacyLights3D(mapId);
+        AppendLegacyLights3D(mapId, eyeWorld);
 
         var query = _entityManager.AllEntityQueryEnumerator<TransformComponent, Transform3DComponent, MapGrid3DComponent>();
         while (query.MoveNext(out var uid, out var transform, out var transform3D, out var grid))
@@ -36,43 +42,64 @@ internal sealed partial class World3DGridOverlay
     }
 
     /// <summary>
-    /// Legacy map lights do not necessarily have Transform3DComponent because many lights are decorative and have
-    /// no physics body to migrate. Feed those lights into the same 3D shading buffer using their composed 3D world
-    /// position. Lights already collected by the native Transform3D pass are skipped by entity id.
+    /// Legacy point lights are collected once per rendered frame, culled against the visible region and bucketed
+    /// by legacy MapId. Only the nearest lights are used for each deck. Bulk legacy lights intentionally skip
+    /// per-face CPU shadow raycasts; native authoritative 3D lights retain their requested shadow behaviour.
     /// </summary>
-    private void AppendLegacyLights3D(MapId mapId)
+    private void AppendLegacyLights3D(MapId mapId, Vector2 eyeWorld)
     {
+        EnsureLegacyLightCache(eyeWorld);
+        if (!_legacyLightCache.TryGetValue(mapId, out var lights))
+            return;
+
+        foreach (var light in lights)
+            _lights3D.Add(light);
+    }
+
+    private void EnsureLegacyLightCache(Vector2 eyeWorld)
+    {
+        var now = _timing.CurTime;
+        if (_legacyLightCacheTime == now &&
+            Vector2.DistanceSquared(_legacyLightCacheEye, eyeWorld) < 0.0001f)
+        {
+            return;
+        }
+
+        _legacyLightCacheTime = now;
+        _legacyLightCacheEye = eyeWorld;
+        foreach (var list in _legacyLightCache.Values)
+            list.Clear();
+
         var query = _entityManager.AllEntityQueryEnumerator<TransformComponent, PointLightComponent>();
         while (query.MoveNext(out var uid, out var transform, out var light))
         {
-            if (transform.MapID != mapId ||
+            if (transform.MapID == MapId.Nullspace ||
                 !light.Enabled ||
                 light.ContainerOccluded ||
-                light.Radius <= 0f)
+                light.Radius <= 0f ||
+                (_entityManager.TryGetComponent(uid, out Transform3DComponent? transform3D) && transform3D.IsAuthoritative))
             {
                 continue;
             }
-
-            var alreadyCollected = false;
-            foreach (var existing in _lights3D)
-            {
-                if (existing.Entity != uid)
-                    continue;
-
-                alreadyCollected = true;
-                break;
-            }
-
-            if (alreadyCollected)
-                continue;
 
             var worldRotation = _transform3DSystem.GetWorldRotation3D(uid, transform);
             var position = _transform3DSystem.GetWorldPosition3D(uid, transform) +
                            Vector3.Transform(new Vector3(light.Offset, 0f), worldRotation);
+            var visibleRadius = RenderRadius + light.Radius;
+            var deltaX = position.X - eyeWorld.X;
+            var deltaY = position.Y - eyeWorld.Y;
+            if (deltaX * deltaX + deltaY * deltaY > visibleRadius * visibleRadius)
+                continue;
 
-            _lights3D.Add(new RenderLight3D(
+            if (!_legacyLightCache.TryGetValue(transform.MapID, out var lights))
+            {
+                lights = new List<RenderLight3D>(32);
+                _legacyLightCache.Add(transform.MapID, lights);
+            }
+
+            lights.Add(new RenderLight3D(
                 uid,
-                mapId,
+                transform.MapID,
                 position,
                 Vector3.UnitY,
                 new Vector3(light.Color.R, light.Color.G, light.Color.B),
@@ -82,7 +109,23 @@ internal sealed partial class World3DGridOverlay
                 LightKind3D.Point,
                 22f,
                 35f,
-                light.CastShadows));
+                false));
+        }
+
+        foreach (var lights in _legacyLightCache.Values)
+        {
+            if (lights.Count <= MaxLegacyLightsPerMap)
+                continue;
+
+            lights.Sort((first, second) =>
+            {
+                var firstX = first.Position.X - eyeWorld.X;
+                var firstY = first.Position.Y - eyeWorld.Y;
+                var secondX = second.Position.X - eyeWorld.X;
+                var secondY = second.Position.Y - eyeWorld.Y;
+                return (firstX * firstX + firstY * firstY).CompareTo(secondX * secondX + secondY * secondY);
+            });
+            lights.RemoveRange(MaxLegacyLightsPerMap, lights.Count - MaxLegacyLightsPerMap);
         }
     }
 

@@ -30,7 +30,7 @@ public sealed partial class SharedPhysics3DSystem : EntitySystem
 {
     public static readonly Vector3 DefaultGravity = new(0f, 0f, -14.5f);
     public const float FixedTimeStep = 1f / 60f;
-    private const int MaximumCatchUpSteps = 8;
+    private const int MaximumCatchUpSteps = 2;
 
     [IoC.Dependency] private INetManager _network = default!;
     [IoC.Dependency] private SharedTransform3DSystem _transform3D = default!;
@@ -1649,21 +1649,46 @@ public sealed partial class SharedPhysics3DSystem : EntitySystem
             var entityRotation = _transform3D.GetWorldRotation3D(uid, transform);
             var physicsPosition = entityPosition + entityRotation.Rotate(registration.ShapeOffset);
             var physicsRotation = SpatialMath.Compose(registration.ShapeRotation, entityRotation);
+            var desiredPose = new RigidPose(physicsPosition, physicsRotation);
+
             if (registration.IsStatic)
             {
                 var reference = world.Simulation.Statics[registration.StaticHandle];
-                reference.Pose = new RigidPose(physicsPosition, physicsRotation);
+                if (PoseEqualsApprox(reference.Pose, desiredPose))
+                    continue;
+
+                reference.Pose = desiredPose;
                 reference.UpdateBounds();
                 continue;
             }
 
             var bodyReference = world.Simulation.Bodies[registration.BodyHandle];
-            bodyReference.Pose = new RigidPose(physicsPosition, physicsRotation);
-            bodyReference.Velocity.Linear = body.LinearVelocity;
-            bodyReference.Velocity.Angular = body.AngularVelocity;
-            bodyReference.UpdateBounds();
+            var poseChanged = !PoseEqualsApprox(bodyReference.Pose, desiredPose);
+            var linearChanged = !bodyReference.Velocity.Linear.Equals(body.LinearVelocity);
+            var angularChanged = !bodyReference.Velocity.Angular.Equals(body.AngularVelocity);
+            if (!poseChanged && !linearChanged && !angularChanged)
+                continue;
+
+            if (poseChanged)
+            {
+                bodyReference.Pose = desiredPose;
+                bodyReference.UpdateBounds();
+            }
+
+            if (linearChanged)
+                bodyReference.Velocity.Linear = body.LinearVelocity;
+            if (angularChanged)
+                bodyReference.Velocity.Angular = body.AngularVelocity;
             bodyReference.Awake = true;
         }
+    }
+
+    private static bool PoseEqualsApprox(RigidPose first, RigidPose second)
+    {
+        if (Vector3.DistanceSquared(first.Position, second.Position) > 1e-10f)
+            return false;
+
+        return MathF.Abs(Quaternion.Dot(first.Orientation, second.Orientation)) >= 0.999999f;
     }
 
     private void ClearContactTransitions()
