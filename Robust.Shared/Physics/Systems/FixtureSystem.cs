@@ -400,6 +400,9 @@ namespace Robust.Shared.Physics.Systems
 
             if (dirty)
                 Dirty(uid, manager);
+
+            var changed = new FixturesChangedEvent((uid, body, manager));
+            RaiseLocalEvent(uid, ref changed, true);
         }
 
         public int GetFixtureCount(EntityUid uid, FixturesComponent? manager = null)

@@ -49,6 +49,7 @@ public sealed partial class SharedPhysics3DSystem : EntitySystem
         SubscribeLocalEvent<Collider3DComponent, ComponentShutdown>(OnColliderShutdown);
         SubscribeLocalEvent<PhysicsBody3DComponent, AfterAutoHandleStateEvent>(OnBodyStateApplied);
         SubscribeLocalEvent<Collider3DComponent, AfterAutoHandleStateEvent>(OnColliderStateApplied);
+        SubscribeLocalEvent<PhysicsBody3DComponent, Physics3DCollisionChangeRequestedEvent>(OnCollisionChangeRequested);
         SubscribeLocalEvent<Transform3DComponent, Transform3DStateAppliedEvent>(OnTransformStateApplied);
         SubscribeLocalEvent<PredictedPhysics3DComponent, ComponentStartup>(OnPredictionStartup);
         SubscribeLocalEvent<PredictedPhysics3DComponent, ComponentShutdown>(OnPredictionShutdown);
@@ -115,6 +116,21 @@ public sealed partial class SharedPhysics3DSystem : EntitySystem
     {
         RemoveBody(uid);
         _pending.Add(uid);
+    }
+
+    private void OnCollisionChangeRequested(
+        Entity<PhysicsBody3DComponent> entity,
+        ref Physics3DCollisionChangeRequestedEvent args)
+    {
+        if (TryComp(entity.Owner, out LegacyPhysics3DBridgeComponent? bridge))
+            bridge.RequestedCanCollide = args.CanCollide;
+
+        if (entity.Comp.CanCollide == args.CanCollide)
+            return;
+
+        entity.Comp.CanCollide = args.CanCollide;
+        Dirty(entity.Owner, entity.Comp);
+        RefreshBody(entity.Owner);
     }
 
     public void RefreshJoint(EntityUid uid)

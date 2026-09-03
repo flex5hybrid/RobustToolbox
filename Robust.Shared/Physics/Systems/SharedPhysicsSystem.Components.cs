@@ -35,6 +35,7 @@ using Robust.Shared.Physics.Components;
 using Robust.Shared.Physics.Dynamics;
 using Robust.Shared.Physics.Dynamics.Contacts;
 using Robust.Shared.Physics.Events;
+using Robust.Shared.Physics3D;
 using Robust.Shared.Utility;
 
 namespace Robust.Shared.Physics.Systems;
@@ -576,13 +577,20 @@ public partial class SharedPhysicsSystem
         if (!PhysicsQuery.Resolve(uid, ref body))
             return false;
 
-        // Native 3D bodies must never be inserted back into the planar solver. The legacy component remains
-        // temporarily available to unmigrated gameplay code, but BEPU and Transform3D are the sole authority.
-        if (value && _transform3DQuery.TryGetComponent(uid, out var transform3D) && transform3D.IsAuthoritative)
-            return false;
+        // Native 3D bodies must never be inserted back into the planar solver. Existing content still calls this
+        // API for doors, containers and temporary collision suppression, so redirect the requested state to BEPU
+        // while forcing the retained compatibility body out of the planar broadphase.
+        var native3D = _transform3DQuery.TryGetComponent(uid, out var transform3D) && transform3D.IsAuthoritative;
+        var requestedValue = value;
+        if (native3D)
+        {
+            var requested = new Physics3DCollisionChangeRequestedEvent(uid, requestedValue);
+            RaiseLocalEvent(uid, ref requested, true);
+            value = false;
+        }
 
         if (body.CanCollide == value)
-            return value;
+            return native3D ? requestedValue : value;
 
         if (value)
         {
@@ -617,7 +625,7 @@ public partial class SharedPhysicsSystem
         if (dirty)
             DirtyField(uid, body, nameof(PhysicsComponent.CanCollide));
 
-        return value;
+        return native3D ? requestedValue : value;
     }
 
     public void SetFixedRotation(EntityUid uid, bool value, bool dirty = true, FixturesComponent? manager = null, PhysicsComponent? body = null)

@@ -16,4 +16,11 @@ public sealed partial class LegacyPhysics3DBridgeComponent : Component
 
     [DataField]
     public bool RaiseLegacyEvents = true;
+
+    /// <summary>
+    /// Collision state requested through the retained 2D API. This remains independent of temporary absence of
+    /// shapes so that adding a fixture later restores the intended native collision state.
+    /// </summary>
+    [DataField]
+    public bool RequestedCanCollide = true;
 }
