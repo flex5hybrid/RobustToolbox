@@ -132,7 +132,7 @@ public sealed class SharedMapGrid3DPhysicsSystem : EntitySystem
                 endX++;
 
             var endY = y + 1;
-            while (endY < size && CanConsumeLayer(cells, consumed, x, endX, endY, z, z + 1, size))
+            while (endY < size && CanConsumeLayer(cells, consumed, x, endX, endY, endY + 1, z, size))
                 endY++;
 
             var endZ = z + 1;
@@ -164,7 +164,13 @@ public sealed class SharedMapGrid3DPhysicsSystem : EntitySystem
         int z,
         ushort size)
     {
+        if (x < 0 || y < 0 || z < 0 || x >= size || y >= size || z >= size)
+            return false;
+
         var index = Flatten(new Vector3i(x, y, z), size);
+        if (index < 0 || index >= cells.Length || index >= consumed.Length)
+            return false;
+
         return !consumed[index] && IsSolid(cells[index]);
     }
 
