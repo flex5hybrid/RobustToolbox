@@ -1,4 +1,5 @@
 using System.Numerics;
+using Robust.Shared.GameObjects;
 using Robust.Shared.Physics;
 using Robust.Shared.Physics.Components;
 using Robust.Shared.Physics.Dynamics;
@@ -84,8 +85,8 @@ public sealed partial class SharedPhysics3DSystem
             !TryComp(other, out LegacyPhysics3DBridgeComponent? otherBridge) ||
             !TryComp(ours, out FixturesComponent? ourFixtures) ||
             !TryComp(other, out FixturesComponent? otherFixtures) ||
-            !TryComp(ours, out ourBody) ||
-            !TryComp(other, out otherBody) ||
+            !TryComp(ours, out ourBody!) ||
+            !TryComp(other, out otherBody!) ||
             !TryGetFixture(ourBridge, ourFixtures, ourShape, out ourFixtureId, out ourFixture) ||
             !TryGetFixture(otherBridge, otherFixtures, otherShape, out otherFixtureId, out otherFixture))
             return false;

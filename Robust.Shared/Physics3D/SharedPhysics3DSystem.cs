@@ -6,13 +6,18 @@ using BepuPhysics;
 using BepuPhysics.Collidables;
 using BepuPhysics.CollisionDetection;
 using BepuPhysics.Constraints;
+using BepuPhysics.Trees;
 using BepuUtilities;
 using BepuUtilities.Memory;
 using Robust.Shared.GameObjects;
 using Robust.Shared.IoC;
 using Robust.Shared.Map;
+using Robust.Shared.Map.Components;
 using Robust.Shared.Maths;
 using Robust.Shared.Network;
+using Robust.Shared.Physics;
+using Robust.Shared.Physics.Components;
+using Robust.Shared.Physics.Systems;
 
 namespace Robust.Shared.Physics3D;
 
@@ -27,12 +32,15 @@ public sealed partial class SharedPhysics3DSystem : EntitySystem
     public const float FixedTimeStep = 1f / 60f;
     private const int MaximumCatchUpSteps = 8;
 
-    [Dependency] private INetManager _network = default!;
-    [Dependency] private SharedTransform3DSystem _transform3D = default!;
+    [IoC.Dependency] private INetManager _network = default!;
+    [IoC.Dependency] private SharedTransform3DSystem _transform3D = default!;
+    [IoC.Dependency] private readonly SharedPhysicsSystem _physics = default!;
+
 
     private readonly Dictionary<MapId, PhysicsWorld3D> _worlds = new();
     private readonly Dictionary<EntityUid, BodyRegistration> _registrations = new();
     private readonly Dictionary<EntityUid, JointRegistration> _jointRegistrations = new();
+    private readonly Dictionary<EntityUid, bool> _awakeStates = new();
     private readonly HashSet<EntityUid> _pending = new();
     private readonly HashSet<EntityUid> _pendingJoints = new();
     private readonly List<EntityUid> _movedBetweenMaps = new();
@@ -90,7 +98,10 @@ public sealed partial class SharedPhysics3DSystem : EntitySystem
         {
             SynchronizeDynamicBodies();
             if (_network.IsServer)
+            {
+                DispatchBodySleepEvents();
                 DispatchContactEvents();
+            }
             else
                 ClearContactTransitions();
         }
@@ -104,6 +115,7 @@ public sealed partial class SharedPhysics3DSystem : EntitySystem
         _worlds.Clear();
         _registrations.Clear();
         _jointRegistrations.Clear();
+        _awakeStates.Clear();
         _pending.Clear();
         _pendingJoints.Clear();
         _movedBetweenMaps.Clear();
@@ -210,11 +222,23 @@ public sealed partial class SharedPhysics3DSystem : EntitySystem
     {
         if (!SpatialMath.IsFinite(linear) ||
             !SpatialMath.IsFinite(angular) ||
-            !_registrations.TryGetValue(uid, out var registration) ||
-            registration.IsStatic)
+            !TryComp(uid, out PhysicsBody3DComponent? body))
         {
             return false;
         }
+
+        body.LinearVelocity = linear;
+        body.AngularVelocity = angular;
+        Dirty(uid, body);
+
+        if (!_registrations.TryGetValue(uid, out var registration))
+        {
+            _pending.Add(uid);
+            return body.BodyType != PhysicsBodyType3D.Static;
+        }
+
+        if (registration.IsStatic)
+            return false;
 
         var reference = _worlds[registration.MapId].Simulation.Bodies[registration.BodyHandle];
         reference.Velocity.Linear = linear;
@@ -222,24 +246,40 @@ public sealed partial class SharedPhysics3DSystem : EntitySystem
         if (wake)
             reference.Awake = true;
 
-        if (TryComp(uid, out PhysicsBody3DComponent? body))
-        {
-            body.LinearVelocity = linear;
-            body.AngularVelocity = angular;
-            Dirty(uid, body);
-        }
-
         return true;
+    }
+
+    public bool SetPlanarLinearVelocity(EntityUid uid, Vector2 velocity, bool wake = true)
+    {
+        if (!TryComp(uid, out PhysicsBody3DComponent? body))
+            return false;
+        return SetVelocity(uid, new Vector3(velocity, body.LinearVelocity.Z), body.AngularVelocity, wake);
+    }
+
+    public bool SetPlanarAngularVelocity(EntityUid uid, float angularVelocity, bool wake = true)
+    {
+        if (!TryComp(uid, out PhysicsBody3DComponent? body))
+            return false;
+        return SetVelocity(uid, body.LinearVelocity, new Vector3(body.AngularVelocity.X, body.AngularVelocity.Y, angularVelocity), wake);
     }
 
     public bool ApplyLinearImpulse(EntityUid uid, Vector3 impulse)
     {
-        if (!SpatialMath.IsFinite(impulse) ||
-            !_registrations.TryGetValue(uid, out var registration) ||
-            registration.IsStatic)
-        {
+        if (!SpatialMath.IsFinite(impulse) || !TryComp(uid, out PhysicsBody3DComponent? body))
             return false;
+
+        if (!_registrations.TryGetValue(uid, out var registration))
+        {
+            if (body.BodyType is PhysicsBodyType3D.Static or PhysicsBodyType3D.Kinematic)
+                return false;
+            body.LinearVelocity += impulse / MathF.Max(body.Mass, 0.001f);
+            Dirty(uid, body);
+            _pending.Add(uid);
+            return true;
         }
+
+        if (registration.IsStatic)
+            return false;
 
         var reference = _worlds[registration.MapId].Simulation.Bodies[registration.BodyHandle];
         if (reference.Kinematic)
@@ -247,6 +287,156 @@ public sealed partial class SharedPhysics3DSystem : EntitySystem
 
         reference.Awake = true;
         reference.ApplyLinearImpulse(impulse);
+        body.LinearVelocity = reference.Velocity.Linear;
+        body.AngularVelocity = reference.Velocity.Angular;
+        Dirty(uid, body);
+        return true;
+    }
+
+    public bool ApplyAngularImpulse(EntityUid uid, Vector3 impulse)
+    {
+        if (!SpatialMath.IsFinite(impulse) || !TryComp(uid, out PhysicsBody3DComponent? body))
+            return false;
+
+        if (!_registrations.TryGetValue(uid, out var registration))
+        {
+            if (body.BodyType is PhysicsBodyType3D.Static or PhysicsBodyType3D.Kinematic)
+                return false;
+            body.AngularVelocity += impulse / MathF.Max(body.Mass, 0.001f);
+            Dirty(uid, body);
+            _pending.Add(uid);
+            return true;
+        }
+        if (registration.IsStatic)
+            return false;
+
+        var reference = _worlds[registration.MapId].Simulation.Bodies[registration.BodyHandle];
+        if (reference.Kinematic)
+            return false;
+
+        reference.Awake = true;
+        reference.ApplyAngularImpulse(impulse);
+        body.LinearVelocity = reference.Velocity.Linear;
+        body.AngularVelocity = reference.Velocity.Angular;
+        Dirty(uid, body);
+        return true;
+    }
+
+    public bool ApplyImpulse(EntityUid uid, Vector3 impulse, Vector3 worldPoint)
+    {
+        if (!SpatialMath.IsFinite(impulse) ||
+            !SpatialMath.IsFinite(worldPoint) ||
+            !_registrations.TryGetValue(uid, out var registration) ||
+            registration.IsStatic)
+            return false;
+
+        var reference = _worlds[registration.MapId].Simulation.Bodies[registration.BodyHandle];
+        if (reference.Kinematic)
+            return false;
+
+        reference.Awake = true;
+        reference.ApplyImpulse(impulse, worldPoint - reference.Pose.Position);
+        if (TryComp(uid, out PhysicsBody3DComponent? body))
+        {
+            body.LinearVelocity = reference.Velocity.Linear;
+            body.AngularVelocity = reference.Velocity.Angular;
+            Dirty(uid, body);
+        }
+        return true;
+    }
+
+    public bool ApplyForce(EntityUid uid, Vector3 force, Vector3? worldPoint = null)
+    {
+        var impulse = force * FixedTimeStep;
+        if (worldPoint is { } point)
+            return ApplyImpulse(uid, impulse, point);
+        return ApplyLinearImpulse(uid, impulse);
+    }
+
+    public bool ApplyTorque(EntityUid uid, Vector3 torque)
+    {
+        return ApplyAngularImpulse(uid, torque * FixedTimeStep);
+    }
+
+    public bool SetBodyType(EntityUid uid, PhysicsBodyType3D bodyType)
+    {
+        if (!TryComp(uid, out PhysicsBody3DComponent? body))
+            return false;
+
+        if (TryComp(uid, out MapGrid3DPhysicsComponent? gridPhysics))
+            gridPhysics.BodyType = bodyType;
+        if (body.BodyType == bodyType)
+            return false;
+
+        body.BodyType = bodyType;
+        if (bodyType == PhysicsBodyType3D.Static)
+        {
+            body.LinearVelocity = Vector3.Zero;
+            body.AngularVelocity = Vector3.Zero;
+        }
+        Dirty(uid, body);
+        RefreshBody(uid);
+        return true;
+    }
+
+    public bool SetDamping(EntityUid uid, float? linear = null, float? angular = null)
+    {
+        if (!TryComp(uid, out PhysicsBody3DComponent? body))
+            return false;
+
+        if (linear is { } linearValue)
+            body.LinearDamping = MathF.Max(0f, linearValue);
+        if (angular is { } angularValue)
+            body.AngularDamping = MathF.Max(0f, angularValue);
+        Dirty(uid, body);
+        if (_registrations.TryGetValue(uid, out var registration) &&
+            !registration.IsStatic &&
+            _worlds.TryGetValue(registration.MapId, out var world))
+            world.Dynamics.Update(registration.BodyHandle, body, GetGravity(uid));
+        return true;
+    }
+
+    public bool SetSleepingAllowed(EntityUid uid, bool allowed)
+    {
+        if (!TryComp(uid, out PhysicsBody3DComponent? body) || body.SleepingAllowed == allowed)
+            return false;
+
+        body.SleepingAllowed = allowed;
+        Dirty(uid, body);
+        if (_registrations.TryGetValue(uid, out var registration) &&
+            !registration.IsStatic &&
+            _worlds.TryGetValue(registration.MapId, out var world))
+        {
+            var reference = world.Simulation.Bodies[registration.BodyHandle];
+            reference.Activity.SleepThreshold = allowed ? 0.01f : -1f;
+            if (!allowed)
+                reference.Awake = true;
+        }
+        return true;
+    }
+
+    public bool SetRotationLocked(EntityUid uid, bool locked)
+    {
+        if (!TryComp(uid, out PhysicsBody3DComponent? body) || body.LockRotation == locked)
+            return false;
+
+        body.LockRotation = locked;
+        if (locked)
+            body.AngularVelocity = Vector3.Zero;
+        Dirty(uid, body);
+        RefreshBody(uid);
+        return true;
+    }
+
+    public bool SetAwake(EntityUid uid, bool awake)
+    {
+        if (!_registrations.TryGetValue(uid, out var registration))
+            return TryComp(uid, out PhysicsBody3DComponent? pending) && pending.BodyType != PhysicsBodyType3D.Static;
+        if (registration.IsStatic)
+            return false;
+
+        var reference = _worlds[registration.MapId].Simulation.Bodies[registration.BodyHandle];
+        reference.Awake = awake;
         return true;
     }
 
@@ -1044,6 +1234,8 @@ public sealed partial class SharedPhysics3DSystem : EntitySystem
             ? registration.StaticHandle.Value
             : registration.BodyHandle.Value;
         body.BackendStatic = registration.IsStatic;
+        if (!registration.IsStatic && _worlds.TryGetValue(registration.MapId, out var world))
+            _awakeStates[uid] = world.Simulation.Bodies[registration.BodyHandle].Awake;
     }
 
     private BodyRegistration AddConvex<TShape>(
@@ -1153,7 +1345,7 @@ public sealed partial class SharedPhysics3DSystem : EntitySystem
                 return null;
         }
 
-        using var builder = new CompoundBuilder(world.Pool, world.Simulation.Shapes, collider.Shapes.Count);
+        var builder = new CompoundBuilder(world.Pool, world.Simulation.Shapes, collider.Shapes.Count);
         var childMass = MathF.Max(0.001f, body.Mass) / collider.Shapes.Count;
         foreach (var shape in collider.Shapes)
         {
@@ -1253,15 +1445,15 @@ public sealed partial class SharedPhysics3DSystem : EntitySystem
         if (body.BodyType == PhysicsBodyType3D.Static)
         {
             var handle = world.Simulation.Statics.Add(new StaticDescription(pose, shapeIndex));
-            var registration = BodyRegistration.ForStatic(
+            var _registration = BodyRegistration.ForStatic(
                 uid,
                 world.MapId,
                 handle,
                 shapeIndex,
                 shapeOffset,
                 shapeRotation);
-            world.CollisionProperties.Add(registration.CollidablePacked, uid, body, shapeDefinitions);
-            return registration;
+            world.CollisionProperties.Add(_registration.CollidablePacked, uid, body, shapeDefinitions);
+            return _registration;
         }
 
         var collidable = new CollidableDescription(
@@ -1276,7 +1468,7 @@ public sealed partial class SharedPhysics3DSystem : EntitySystem
         else
         {
             description = BodyDescription.CreateDynamic(pose, velocity, inertia, collidable, activity);
-            if (body.BodyType == PhysicsBodyType3D.Character)
+            if (body.BodyType == PhysicsBodyType3D.Character || body.LockRotation)
                 description.LocalInertia.InverseInertiaTensor = default;
         }
 
@@ -1308,6 +1500,7 @@ public sealed partial class SharedPhysics3DSystem : EntitySystem
     private void RemoveBody(EntityUid uid)
     {
         _pending.Remove(uid);
+        _awakeStates.Remove(uid);
         if (!_registrations.Remove(uid, out var registration) ||
             !_worlds.TryGetValue(registration.MapId, out var world))
         {
@@ -1375,6 +1568,63 @@ public sealed partial class SharedPhysics3DSystem : EntitySystem
                 body.LinearVelocity = linearVelocity;
                 body.AngularVelocity = angularVelocity;
                 Dirty(uid, body);
+            }
+
+            // Keep the disabled planar component as an API-facing mirror while legacy content is being migrated.
+            // It never participates in collision resolution, but immediate gameplay reads still observe real BEPU
+            // velocities instead of stale pre-migration values.
+            if (_network.IsServer &&
+                HasComp<LegacyPhysics3DBridgeComponent>(uid) &&
+                HasComp<PhysicsComponent>(uid))
+            {
+                var legacyBody = Comp<PhysicsComponent>(uid);
+                var legacyLinear = new Vector2(linearVelocity.X, linearVelocity.Y);
+                if (!legacyBody.LinearVelocity.EqualsApprox(legacyLinear, 0.0000001f) ||
+                !Robust.Shared.Maths.MathHelper.CloseToPercent(legacyBody.AngularVelocity, angularVelocity.Z, 0.00001f))
+            {
+                // Используем методы физической системы вместо прямого изменения полей
+                _physics.SetLinearVelocity(uid, legacyLinear, component: legacyBody);
+                _physics.SetAngularVelocity(uid, angularVelocity.Z, component: legacyBody);
+            }
+
+            }
+        }
+    }
+
+    private void DispatchBodySleepEvents()
+    {
+        foreach (var (uid, registration) in _registrations)
+        {
+            if (registration.IsStatic ||
+                !_worlds.TryGetValue(registration.MapId, out var world))
+                continue;
+
+            var awake = world.Simulation.Bodies[registration.BodyHandle].Awake;
+            if (!_awakeStates.TryGetValue(uid, out var previous))
+            {
+                _awakeStates[uid] = awake;
+                continue;
+            }
+
+            if (awake == previous)
+                continue;
+
+            _awakeStates[uid] = awake;
+            if (!HasComp<LegacyPhysics3DBridgeComponent>(uid) ||
+                !TryComp(uid, out PhysicsComponent? legacyBody))
+                continue;
+
+            _physics.SetAwake((uid, legacyBody), awake);
+            DirtyField(uid, legacyBody, nameof(PhysicsComponent.Awake));
+            if (awake)
+            {
+                var wake = new PhysicsWakeEvent(uid, legacyBody);
+                RaiseLocalEvent(uid, ref wake, true);
+            }
+            else
+            {
+                var sleep = new PhysicsSleepEvent(uid, legacyBody);
+                RaiseLocalEvent(uid, ref sleep, true);
             }
         }
     }
@@ -1878,16 +2128,16 @@ public sealed partial class SharedPhysics3DSystem : EntitySystem
             return IsCandidate(collidable, childIndex);
         }
 
-        public void OnRayHit(
+        public void OnRayHit( // Изменено на void
             in RayData ray,
             ref float maximumT,
             float t,
-            Vector3 normal,
+            in Vector3 normal,
             CollidableReference collidable,
             int childIndex)
         {
             if (!_properties.TryGet(collidable, out var properties) || t < 0f || t > maximumT)
-                return;
+                return; // Изменено на пустой return
 
             maximumT = t;
             Found = true;
@@ -1895,6 +2145,8 @@ public sealed partial class SharedPhysics3DSystem : EntitySystem
             Normal = normal;
             Distance = t;
             Sensor = properties.GetShape(childIndex).Sensor;
+
+            // return удален, так как метод ничего не должен возвращать
         }
 
         private bool IsCandidate(CollidableReference collidable, int childIndex = -1)

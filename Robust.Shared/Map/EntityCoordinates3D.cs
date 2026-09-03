@@ -54,6 +54,15 @@ public readonly partial record struct EntityCoordinates3D : ISpanFormattable
         ReadOnlySpan<char> format,
         IFormatProvider? provider)
     {
-        return FormatHelpers.TryFormatInto(destination, out charsWritten, ToString());
+        var strValue = ToString();
+
+        if (strValue.AsSpan().TryCopyTo(destination))
+        {
+            charsWritten = strValue.Length;
+            return true;
+        }
+
+        charsWritten = 0;
+        return false;
     }
 }

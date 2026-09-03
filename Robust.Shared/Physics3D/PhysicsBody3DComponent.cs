@@ -60,6 +60,9 @@ public sealed partial class PhysicsBody3DComponent : Component
     public bool SleepingAllowed = true;
 
     [DataField, AutoNetworkedField]
+    public bool LockRotation;
+
+    [DataField, AutoNetworkedField]
     public ContinuousDetectionMode3D ContinuousDetection = ContinuousDetectionMode3D.Discrete;
 
     [ViewVariables]

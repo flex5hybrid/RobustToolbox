@@ -16,6 +16,8 @@ using Robust.Shared.Map.Components;
 using Robust.Shared.Maths;
 using Robust.Shared.Physics3D;
 using Robust.Shared.Timing;
+using Robust.Shared.Physics.Components;
+using Robust.Shared.Physics;
 
 namespace Robust.Client.GameObjects;
 

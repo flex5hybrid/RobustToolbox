@@ -10,6 +10,7 @@ using Robust.Shared.Maths;
 using Robust.Shared.Physics.Collision;
 using Robust.Shared.Physics.Components;
 using Robust.Shared.Physics.Events;
+using Robust.Shared.Physics3D;
 using Robust.Shared.Profiling;
 using Robust.Shared.Threading;
 using Robust.Shared.Timing;
@@ -52,6 +53,7 @@ namespace Robust.Shared.Physics.Systems
         [Dependency] private SharedTransformSystem _transform = default!;
         [Dependency] private ProfManager _prof = default!;
         [Dependency] private CollisionWakeSystem _wakeSystem = default!;
+        [Dependency] private SharedPhysics3DSystem _physics3D = default!;
 
         private int _substeps;
 

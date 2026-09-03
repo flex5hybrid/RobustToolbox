@@ -6,6 +6,7 @@ using Robust.Client.ResourceManagement;
 using Robust.Shared.GameObjects;
 using Robust.Shared.Map;
 using Robust.Shared.Maths;
+using Robust.Shared.Physics3D;
 using Robust.Shared.Utility;
 
 namespace Robust.Client.GameObjects;

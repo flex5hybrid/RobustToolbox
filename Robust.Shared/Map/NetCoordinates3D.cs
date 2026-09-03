@@ -35,6 +35,6 @@ public readonly record struct NetCoordinates3D(NetEntity NetEntity, Vector3 Posi
         ReadOnlySpan<char> format,
         IFormatProvider? provider)
     {
-        return FormatHelpers.TryFormatInto(destination, out charsWritten, ToString());
+        return FormatHelpers.TryFormatInto(destination, out charsWritten, $"{ToString()}");
     }
 }

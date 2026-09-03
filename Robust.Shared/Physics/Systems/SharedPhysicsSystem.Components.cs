@@ -174,10 +174,54 @@ public partial class SharedPhysicsSystem
         return (body.BodyType & (BodyType.Dynamic | BodyType.KinematicController)) != 0x0;
     }
 
+    private bool IsNative3DBody(EntityUid uid)
+    {
+        return _transform3DQuery.TryGetComponent(uid, out var transform3D) &&
+               transform3D.IsAuthoritative &&
+               HasComp<PhysicsBody3DComponent>(uid);
+    }
+
+    private void MirrorNative3DVelocity(EntityUid uid, PhysicsComponent body)
+    {
+        Vector3 linear;
+        Vector3 angular;
+        if (!_physics3D.TryGetVelocity(uid, out linear, out angular))
+        {
+            if (!TryComp(uid, out PhysicsBody3DComponent? body3D))
+                return;
+            linear = body3D.LinearVelocity;
+            angular = body3D.AngularVelocity;
+        }
+
+        body.LinearVelocity = new Vector2(linear.X, linear.Y);
+        body.AngularVelocity = angular.Z;
+        DirtyFields(uid, body, null,
+            nameof(PhysicsComponent.LinearVelocity),
+            nameof(PhysicsComponent.AngularVelocity));
+    }
+
+    private static PhysicsBodyType3D ConvertLegacyBodyType(BodyType bodyType)
+    {
+        if ((bodyType & BodyType.KinematicController) != 0)
+            return PhysicsBodyType3D.Character;
+        if ((bodyType & BodyType.Dynamic) != 0)
+            return PhysicsBodyType3D.Dynamic;
+        if ((bodyType & BodyType.Static) != 0)
+            return PhysicsBodyType3D.Static;
+        return PhysicsBodyType3D.Kinematic;
+    }
+
     #region Impulses
 
     public void ApplyAngularImpulse(EntityUid uid, float impulse, FixturesComponent? manager = null, PhysicsComponent? body = null)
     {
+        if (PhysicsQuery.Resolve(uid, ref body) && IsMoveable(body) && IsNative3DBody(uid))
+        {
+            _physics3D.ApplyAngularImpulse(uid, new Vector3(0f, 0f, impulse));
+            MirrorNative3DVelocity(uid, body);
+            return;
+        }
+
         if (!PhysicsQuery.Resolve(uid, ref body) || !IsMoveable(body) || !WakeBody(uid, manager: manager, body: body))
         {
             return;
@@ -188,6 +232,14 @@ public partial class SharedPhysicsSystem
 
     public void ApplyForce(EntityUid uid, Vector2 force, Vector2 point, FixturesComponent? manager = null, PhysicsComponent? body = null)
     {
+        if (PhysicsQuery.Resolve(uid, ref body) && IsMoveable(body) && IsNative3DBody(uid))
+        {
+            _physics3D.ApplyForce(uid, new Vector3(force, 0f));
+            _physics3D.ApplyTorque(uid, new Vector3(0f, 0f, Vector2Helpers.Cross(point - body._localCenter, force)));
+            MirrorNative3DVelocity(uid, body);
+            return;
+        }
+
         if (!PhysicsQuery.Resolve(uid, ref body) || !IsMoveable(body) || !WakeBody(uid, manager: manager, body: body))
         {
             return;
@@ -199,6 +251,13 @@ public partial class SharedPhysicsSystem
 
     public void ApplyForce(EntityUid uid, Vector2 force, FixturesComponent? manager = null, PhysicsComponent? body = null)
     {
+        if (PhysicsQuery.Resolve(uid, ref body) && IsMoveable(body) && IsNative3DBody(uid))
+        {
+            _physics3D.ApplyForce(uid, new Vector3(force, 0f));
+            MirrorNative3DVelocity(uid, body);
+            return;
+        }
+
         if (!PhysicsQuery.Resolve(uid, ref body) || !IsMoveable(body) || !WakeBody(uid, manager: manager, body: body))
         {
             return;
@@ -209,6 +268,13 @@ public partial class SharedPhysicsSystem
 
     public void ApplyTorque(EntityUid uid, float torque, FixturesComponent? manager = null, PhysicsComponent? body = null)
     {
+        if (PhysicsQuery.Resolve(uid, ref body) && IsMoveable(body) && IsNative3DBody(uid))
+        {
+            _physics3D.ApplyTorque(uid, new Vector3(0f, 0f, torque));
+            MirrorNative3DVelocity(uid, body);
+            return;
+        }
+
         if (!PhysicsQuery.Resolve(uid, ref body) || !IsMoveable(body) || !WakeBody(uid, manager: manager, body: body))
         {
             return;
@@ -220,6 +286,13 @@ public partial class SharedPhysicsSystem
 
     public void ApplyLinearImpulse(EntityUid uid, Vector2 impulse, FixturesComponent? manager = null, PhysicsComponent? body = null)
     {
+        if (PhysicsQuery.Resolve(uid, ref body) && IsMoveable(body) && IsNative3DBody(uid))
+        {
+            _physics3D.ApplyLinearImpulse(uid, new Vector3(impulse, 0f));
+            MirrorNative3DVelocity(uid, body);
+            return;
+        }
+
         if (!PhysicsQuery.Resolve(uid, ref body) || !IsMoveable(body) || !WakeBody(uid, manager: manager, body: body))
         {
             return;
@@ -230,6 +303,18 @@ public partial class SharedPhysicsSystem
 
     public void ApplyLinearImpulse(EntityUid uid, Vector2 impulse, Vector2 point, FixturesComponent? manager = null, PhysicsComponent? body = null)
     {
+        if (PhysicsQuery.Resolve(uid, ref body) && IsMoveable(body) && IsNative3DBody(uid))
+        {
+            _physics3D.ApplyLinearImpulse(uid, new Vector3(impulse, 0f));
+            var matrix3D = _transform.GetWorldMatrix(uid);
+            var torque = Vector2Helpers.Cross(
+                Vector2.Transform(point, matrix3D) - Vector2.Transform(body._localCenter, matrix3D),
+                impulse);
+            _physics3D.ApplyAngularImpulse(uid, new Vector3(0f, 0f, torque));
+            MirrorNative3DVelocity(uid, body);
+            return;
+        }
+
         if (!PhysicsQuery.Resolve(uid, ref body) || !IsMoveable(body) || !WakeBody(uid, manager: manager, body: body))
         {
             return;
@@ -278,6 +363,9 @@ public partial class SharedPhysicsSystem
     /// </summary>
     public void ResetDynamics(EntityUid uid, PhysicsComponent body, bool dirty = true)
     {
+        if (IsNative3DBody(uid))
+            _physics3D.SetVelocity(uid, Vector3.Zero, Vector3.Zero, wake: false);
+
         body.Torque = 0f;
         body.AngularVelocity = 0f;
         body.Force = Vector2.Zero;
@@ -365,10 +453,17 @@ public partial class SharedPhysicsSystem
         RaiseLocalEvent(uid, ref ev);
     }
 
-    public bool SetAngularVelocity(EntityUid uid, float value, bool dirty = true, FixturesComponent? manager = null, PhysicsComponent? body = null)
+    public bool SetAngularVelocity(EntityUid uid, float value, bool dirty = true, FixturesComponent? manager = null, PhysicsComponent? body = null, PhysicsComponent? component = null)
     {
         if (!PhysicsQuery.Resolve(uid, ref body))
             return false;
+
+        if (IsNative3DBody(uid))
+        {
+            var changed = _physics3D.SetPlanarAngularVelocity(uid, value, value * value > 0f);
+            MirrorNative3DVelocity(uid, body);
+            return changed;
+        }
 
         if (body.BodyType == BodyType.Static)
             return false;
@@ -395,10 +490,17 @@ public partial class SharedPhysicsSystem
     /// <summary>
     /// Attempts to set the body to collidable, wake it, then move it.
     /// </summary>
-    public bool SetLinearVelocity(EntityUid uid, Vector2 velocity, bool dirty = true, bool wakeBody = true, FixturesComponent? manager = null, PhysicsComponent? body = null)
+    public bool SetLinearVelocity(EntityUid uid, Vector2 velocity, bool dirty = true, bool wakeBody = true, FixturesComponent? manager = null, PhysicsComponent? body = null, PhysicsComponent? component = null)
     {
         if (!PhysicsQuery.Resolve(uid, ref body))
             return false;
+
+        if (IsNative3DBody(uid))
+        {
+            var changed = _physics3D.SetPlanarLinearVelocity(uid, velocity, wakeBody && velocity.LengthSquared() > 0f);
+            MirrorNative3DVelocity(uid, body);
+            return changed;
+        }
 
         if (body.BodyType == BodyType.Static)
             return false;
@@ -421,6 +523,9 @@ public partial class SharedPhysicsSystem
 
     public void SetAngularDamping(EntityUid uid, PhysicsComponent body, float value, bool dirty = true)
     {
+        if (IsNative3DBody(uid))
+            _physics3D.SetDamping(uid, angular: value);
+
         if (MathHelper.CloseTo(body.AngularDamping, value))
             return;
 
@@ -431,6 +536,9 @@ public partial class SharedPhysicsSystem
 
     public void SetLinearDamping(EntityUid uid, PhysicsComponent body, float value, bool dirty = true)
     {
+        if (IsNative3DBody(uid))
+            _physics3D.SetDamping(uid, linear: value);
+
         if (MathHelper.CloseTo(body.LinearDamping, value))
             return;
 
@@ -448,6 +556,25 @@ public partial class SharedPhysicsSystem
     public void SetAwake(Entity<PhysicsComponent> ent, bool value, bool updateSleepTime = true)
     {
         var (uid, body) = ent;
+        if (IsNative3DBody(uid))
+        {
+            if (!value)
+            {
+                _physics3D.SetVelocity(uid, Vector3.Zero, Vector3.Zero, wake: false);
+                body.LinearVelocity = Vector2.Zero;
+                body.AngularVelocity = 0f;
+                body.Force = Vector2.Zero;
+                body.Torque = 0f;
+                DirtyFields(uid, body, null,
+                    nameof(PhysicsComponent.LinearVelocity),
+                    nameof(PhysicsComponent.AngularVelocity),
+                    nameof(PhysicsComponent.Force),
+                    nameof(PhysicsComponent.Torque));
+            }
+            _physics3D.SetAwake(uid, value);
+            return;
+        }
+
         var canWake = body.BodyType != BodyType.Static && body.CanCollide;
 
         if (body.Awake == value)
@@ -507,6 +634,9 @@ public partial class SharedPhysicsSystem
     {
         if (!PhysicsQuery.Resolve(uid, ref body))
             return;
+
+        if (IsNative3DBody(uid))
+            _physics3D.SetBodyType(uid, ConvertLegacyBodyType(value));
 
         if (body.BodyType == value)
             return;
@@ -630,7 +760,13 @@ public partial class SharedPhysicsSystem
 
     public void SetFixedRotation(EntityUid uid, bool value, bool dirty = true, FixturesComponent? manager = null, PhysicsComponent? body = null)
     {
-        if (!PhysicsQuery.Resolve(uid, ref body) || body.FixedRotation == value)
+        if (!PhysicsQuery.Resolve(uid, ref body))
+            return;
+
+        if (IsNative3DBody(uid))
+            _physics3D.SetRotationLocked(uid, value);
+
+        if (body.FixedRotation == value)
             return;
 
         body.FixedRotation = value;
@@ -681,6 +817,9 @@ public partial class SharedPhysicsSystem
 
     public void SetSleepingAllowed(EntityUid uid, PhysicsComponent body, bool value, bool dirty = true)
     {
+        if (IsNative3DBody(uid))
+            _physics3D.SetSleepingAllowed(uid, value);
+
         if (body.SleepingAllowed == value)
             return;
 
@@ -711,6 +850,12 @@ public partial class SharedPhysicsSystem
     {
         if (!PhysicsQuery.Resolve(uid, ref body))
             return false;
+
+        if (IsNative3DBody(uid))
+        {
+            SetCanCollide(uid, true, manager: manager, body: body, force: force);
+            return _physics3D.SetAwake(uid, true);
+        }
 
         if (!SetCanCollide(uid, true, manager: manager, body: body, force: force))
             return false;

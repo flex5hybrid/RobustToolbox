@@ -408,7 +408,7 @@ public sealed class GltfMeshResource : BaseResource, IBaseResource
             {
                 var source = surface.Vertices[i];
                 var position = ConvertCoordinates(Vector3.Transform(source.Position, transform));
-                var normal = source.Normal is { } sourceNormal
+                Vector3? normal = source.Normal is { } sourceNormal
                     ? ConvertCoordinates(Vector3.TransformNormal(sourceNormal, normalMatrix))
                     : null;
                 if (normal is { } value && value.LengthSquared() > 1e-8f)

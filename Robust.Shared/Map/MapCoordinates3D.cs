@@ -56,7 +56,7 @@ public readonly partial record struct MapCoordinates3D : ISpanFormattable
         ReadOnlySpan<char> format,
         IFormatProvider? provider)
     {
-        return FormatHelpers.TryFormatInto(destination, out charsWritten, ToString());
+        return FormatHelpers.TryFormatInto(destination, out charsWritten, $"{ToString()}");
     }
 
     private static bool IsFinite(Vector3 value)
