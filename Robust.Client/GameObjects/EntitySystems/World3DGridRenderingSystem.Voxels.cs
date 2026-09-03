@@ -4,6 +4,7 @@ using Robust.Shared.GameObjects;
 using Robust.Shared.Map;
 using Robust.Shared.Map.Components;
 using Robust.Shared.Maths;
+using Robust.Shared.Physics3D;
 
 namespace Robust.Client.GameObjects;
 
@@ -11,6 +12,8 @@ internal sealed partial class World3DGridOverlay
 {
     private void AppendNative3DGrids(MapId mapId, Vector2 eyeWorld, ref int gridCount)
     {
+        AppendLegacyLights3D(mapId);
+
         var query = _entityManager.AllEntityQueryEnumerator<TransformComponent, Transform3DComponent, MapGrid3DComponent>();
         while (query.MoveNext(out var uid, out var transform, out var transform3D, out var grid))
         {
@@ -29,6 +32,57 @@ internal sealed partial class World3DGridOverlay
 
                 AppendVoxelFaces(uid, transform.MapID, grid, indices, voxel, localMinimum, worldMatrix);
             }
+        }
+    }
+
+    /// <summary>
+    /// Legacy map lights do not necessarily have Transform3DComponent because many lights are decorative and have
+    /// no physics body to migrate. Feed those lights into the same 3D shading buffer using their composed 3D world
+    /// position. Lights already collected by the native Transform3D pass are skipped by entity id.
+    /// </summary>
+    private void AppendLegacyLights3D(MapId mapId)
+    {
+        var query = _entityManager.AllEntityQueryEnumerator<TransformComponent, PointLightComponent>();
+        while (query.MoveNext(out var uid, out var transform, out var light))
+        {
+            if (transform.MapID != mapId ||
+                !light.Enabled ||
+                light.ContainerOccluded ||
+                light.Radius <= 0f)
+            {
+                continue;
+            }
+
+            var alreadyCollected = false;
+            foreach (var existing in _lights3D)
+            {
+                if (existing.Entity != uid)
+                    continue;
+
+                alreadyCollected = true;
+                break;
+            }
+
+            if (alreadyCollected)
+                continue;
+
+            var worldRotation = _transform3DSystem.GetWorldRotation3D(uid, transform);
+            var position = _transform3DSystem.GetWorldPosition3D(uid, transform) +
+                           Vector3.Transform(new Vector3(light.Offset, 0f), worldRotation);
+
+            _lights3D.Add(new RenderLight3D(
+                uid,
+                mapId,
+                position,
+                Vector3.UnitY,
+                new Vector3(light.Color.R, light.Color.G, light.Color.B),
+                light.Radius,
+                light.Energy,
+                light.Falloff,
+                LightKind3D.Point,
+                22f,
+                35f,
+                light.CastShadows));
         }
     }
 

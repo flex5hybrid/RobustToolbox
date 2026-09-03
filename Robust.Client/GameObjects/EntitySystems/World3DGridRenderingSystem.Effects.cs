@@ -4,6 +4,8 @@ using System.Numerics;
 using Robust.Shared.GameObjects;
 using Robust.Shared.Map;
 using Robust.Shared.Maths;
+using Robust.Shared.Physics.Components;
+using Robust.Shared.Physics3D;
 
 namespace Robust.Client.GameObjects;
 
@@ -11,8 +13,51 @@ internal sealed partial class World3DGridOverlay
 {
     private void AppendNative3DVisualEffects(MapId mapId, Vector2 eyeWorld, Vector2 billboardRight, Vector2 billboardForward)
     {
+        AppendLegacySpriteEntities(mapId, eyeWorld, billboardRight, billboardForward);
         AppendDecals3D(mapId, eyeWorld);
         AppendParticles3D(mapId, eyeWorld, billboardRight, billboardForward);
+    }
+
+    /// <summary>
+    /// Keeps ordinary SS14 visual entities visible during the 2D-to-3D migration. The main entity pass owns
+    /// collidable Physics+Fixtures sprites, while this pass handles decoration, lamps, signs and other sprites
+    /// that intentionally have no physics body. Native meshes/primitives are excluded to avoid drawing them twice.
+    /// </summary>
+    private void AppendLegacySpriteEntities(MapId mapId, Vector2 eyeWorld, Vector2 billboardRight, Vector2 billboardForward)
+    {
+        var eyeRotation = new Angle(-_firstPersonYaw);
+        var query = _entityManager.AllEntityQueryEnumerator<TransformComponent, SpriteComponent>();
+        while (query.MoveNext(out var uid, out var transform, out var sprite))
+        {
+            if (transform.MapID != mapId ||
+                uid == _localPlayer ||
+                !sprite._visible ||
+                (sprite._containerOccluded && !sprite.OverrideContainerOcclusion) ||
+                _entityManager.HasComponent<MapGridComponent>(uid) ||
+                (_entityManager.HasComponent<PhysicsComponent>(uid) &&
+                 _entityManager.HasComponent<FixturesComponent>(uid)) ||
+                _entityManager.HasComponent<Primitive3DComponent>(uid) ||
+                _entityManager.HasComponent<Mesh3DComponent>(uid))
+            {
+                continue;
+            }
+
+            var worldPosition3D = _transform3DSystem.GetWorldPosition3D(uid, transform);
+            if (MathF.Abs(worldPosition3D.X - eyeWorld.X) > RenderRadius ||
+                MathF.Abs(worldPosition3D.Y - eyeWorld.Y) > RenderRadius)
+            {
+                continue;
+            }
+
+            var (_, worldRotation) = _transformSystem.GetWorldPositionRotation(transform);
+            TryAppendSpriteBillboard(
+                sprite,
+                worldRotation,
+                eyeRotation,
+                worldPosition3D,
+                billboardRight,
+                billboardForward);
+        }
     }
 
     private void AppendDecals3D(MapId mapId, Vector2 eyeWorld)
