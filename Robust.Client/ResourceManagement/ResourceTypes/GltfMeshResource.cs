@@ -5,6 +5,7 @@ using System.IO;
 using System.Numerics;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using Robust.Shared.ContentPack;
 using Robust.Shared.IoC;
 using Robust.Shared.Utility;
@@ -28,6 +29,12 @@ public sealed class GltfMeshResource : BaseResource, IBaseResource
         var resources = dependencies.Resolve<IResourceManager>();
         using var stream = resources.ContentFileRead(path);
         LoadDocument(resources, path, stream);
+    }
+
+    public override void Reload(IDependencyCollection dependencies, ResPath path, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        Load(dependencies, path);
     }
 
     private void LoadDocument(IResourceManager resources, ResPath path, Stream stream)

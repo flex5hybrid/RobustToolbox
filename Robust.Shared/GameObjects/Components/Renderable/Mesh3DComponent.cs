@@ -30,10 +30,10 @@ public sealed partial class Mesh3DComponent : Component
     public Color Emissive = Color.Transparent;
 
     [DataField, AutoNetworkedField]
-    public float Roughness = 0.7f;
+    public float Roughness = -1f;
 
     [DataField, AutoNetworkedField]
-    public float Metallic;
+    public float Metallic = -1f;
 
     [DataField, AutoNetworkedField]
     public bool DoubleSided;

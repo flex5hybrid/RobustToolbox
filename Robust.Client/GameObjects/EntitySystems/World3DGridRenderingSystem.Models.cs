@@ -149,6 +149,8 @@ internal sealed partial class World3DGridOverlay
             new Vector3(materialColor.X, materialColor.Y, materialColor.Z));
         var emissive = new Vector3(component.Emissive.R, component.Emissive.G, component.Emissive.B) * component.Emissive.A +
                        (surface.Emissive ?? Vector3.Zero);
+        var roughness = Math.Clamp(component.Roughness >= 0f ? component.Roughness : surface.Roughness, 0.04f, 1f);
+        var metallic = Math.Clamp(component.Metallic >= 0f ? component.Metallic : surface.Metallic, 0f, 1f);
 
         for (var i = 0; i + 2 < sourceVertices.Length; i += 3)
         {
@@ -161,10 +163,10 @@ internal sealed partial class World3DGridOverlay
             var localNormal = a.Normal ?? Vector3.Cross(b.Position - a.Position, c.Position - a.Position);
             var normal = Vector3.Transform(localNormal, worldRotation);
             normal = normal.LengthSquared() > 1e-8f ? Vector3.Normalize(normal) : Vector3.UnitZ;
-            var illumination = component.ReceiveLights
-                ? ShadeSurface3D(uid, mapId, (worldA + worldB + worldC) / 3f, normal)
-                : Vector3.One;
-            var lit = Vector3.Min(Vector3.Multiply(albedo, illumination) + emissive, Vector3.One);
+            var center = (worldA + worldB + worldC) / 3f;
+            var lit = component.ReceiveLights
+                ? ShadeMaterial3D(uid, mapId, center, normal, albedo, emissive, roughness, metallic)
+                : Vector3.Min(albedo + emissive, Vector3.One);
             var color = new Vector4(lit, alpha);
 
             AddVertex(destination, worldA, color, a.Uv);
@@ -179,6 +181,29 @@ internal sealed partial class World3DGridOverlay
             }
         }
 
+    }
+
+    private Vector3 ShadeMaterial3D(
+        EntityUid uid,
+        MapId mapId,
+        Vector3 center,
+        Vector3 normal,
+        Vector3 albedo,
+        Vector3 emissive,
+        float roughness,
+        float metallic)
+    {
+        var illumination = ShadeSurface3D(uid, mapId, center, normal);
+        var diffuse = Vector3.Multiply(albedo, illumination) * (1f - metallic * 0.58f);
+        var view = _cameraPosition3D - center;
+        view = view.LengthSquared() > 1e-8f ? Vector3.Normalize(view) : normal;
+        var fresnelBase = Vector3.Lerp(new Vector3(0.04f), albedo, metallic);
+        var facing = Math.Clamp(Vector3.Dot(normal, view), 0f, 1f);
+        var grazing = MathF.Pow(1f - facing, 5f);
+        var fresnel = Vector3.Lerp(fresnelBase, Vector3.One, grazing);
+        var gloss = MathF.Pow(MathF.Max(facing, 0.0001f), 2f + (1f - roughness) * 30f) * (1f - roughness * 0.72f);
+        var specular = Vector3.Multiply(fresnel, illumination) * gloss;
+        return Vector3.Min(diffuse + specular + emissive, Vector3.One);
     }
 
     private uint TryResolveModelTexture(string path)

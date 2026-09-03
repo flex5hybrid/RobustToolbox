@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Numerics;
+using System.Threading;
 using Robust.Shared.ContentPack;
 using Robust.Shared.IoC;
 using Robust.Shared.Utility;
@@ -22,6 +23,17 @@ public sealed class ObjMeshResource : BaseResource, IBaseResource
     static bool IBaseResource.CanBeRemoved => true;
 
     public override void Load(IDependencyCollection dependencies, ResPath path)
+    {
+        LoadResource(dependencies, path);
+    }
+
+    public override void Reload(IDependencyCollection dependencies, ResPath path, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        LoadResource(dependencies, path);
+    }
+
+    private void LoadResource(IDependencyCollection dependencies, ResPath path)
     {
         var resourceManager = dependencies.Resolve<IResourceManager>();
         using var stream = resourceManager.ContentFileRead(path);

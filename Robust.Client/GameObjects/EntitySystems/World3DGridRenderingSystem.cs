@@ -207,6 +207,7 @@ internal sealed partial class World3DGridOverlay : Overlay
     private float _localCameraBob;
     private float _firstPersonYaw;
     private float _firstPersonPitch = World3DGridRenderingSystem.DefaultFirstPersonPitch;
+    private Vector3 _cameraPosition3D;
 
     private readonly DiagnosticStage _diagnosticStage;
 
@@ -298,6 +299,7 @@ internal sealed partial class World3DGridOverlay : Overlay
             0f,
             0f,
             FirstPersonEyeHeight + _localCameraBob);
+        _cameraPosition3D = camera;
 
         var horizontalLook = MathF.Cos(_firstPersonPitch);
         var lookDirection = new Vector3(
