@@ -251,8 +251,12 @@ public sealed class SharedTransform3DSystem : EntitySystem
         if (transform3D.LocalRotation3D.Equals(rotation))
             return;
 
+        var oldRotation = transform3D.LocalRotation3D;
         transform3D.LocalRotation3D = rotation;
         Dirty(uid, transform3D);
+
+        var rotationEvent = new Transform3DRotationChangedEvent(oldRotation, rotation);
+        RaiseLocalEvent(uid, ref rotationEvent);
 
         if (transform3D.Authoritative && _transformQuery.TryGetComponent(uid, out var transform))
             _transform.SetLocalRotation(uid, GetYaw(rotation), transform);
@@ -383,6 +387,7 @@ public sealed class SharedTransform3DSystem : EntitySystem
             return;
 
         var oldPosition = entity.Comp.LocalPosition3D;
+        var oldRotation = entity.Comp.LocalRotation3D;
         var position = new Vector3(state.X, state.Y, state.Z);
         entity.Comp.Authoritative = state.Authoritative;
         entity.Comp.LocalPosition3D = IsFinite(position) ? position : Vector3.Zero;
@@ -401,6 +406,12 @@ public sealed class SharedTransform3DSystem : EntitySystem
         {
             var moveEvent = new Transform3DPositionChangedEvent(oldPosition, entity.Comp.LocalPosition3D);
             RaiseLocalEvent(entity.Owner, ref moveEvent);
+        }
+
+        if (oldRotation != entity.Comp.LocalRotation3D)
+        {
+            var rotationEvent = new Transform3DRotationChangedEvent(oldRotation, entity.Comp.LocalRotation3D);
+            RaiseLocalEvent(entity.Owner, ref rotationEvent);
         }
 
         var appliedEvent = new Transform3DStateAppliedEvent();

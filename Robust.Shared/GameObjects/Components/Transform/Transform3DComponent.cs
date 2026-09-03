@@ -69,6 +69,13 @@ public sealed class Transform3DComponentState : ComponentState
 public readonly record struct Transform3DPositionChangedEvent(Vector3 OldPosition, Vector3 NewPosition);
 
 /// <summary>
+/// Raised whenever the authoritative local 3D orientation changes.
+/// Spatial ports, lights and other direction-sensitive systems use this instead of the legacy yaw event.
+/// </summary>
+[ByRefEvent]
+public readonly record struct Transform3DRotationChangedEvent(Quaternion OldRotation, Quaternion NewRotation);
+
+/// <summary>
 /// Raised after a network state replaces a 3D pose, allowing prediction backends to rebuild from the server snapshot.
 /// </summary>
 [ByRefEvent]
