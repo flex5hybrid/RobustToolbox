@@ -76,7 +76,7 @@ internal sealed partial class World3DGridOverlay
             var position = _transform3DSystem.GetWorldPosition3D(uid, transform);
             if (MathF.Abs(position.X - eyeWorld.X) > RenderRadius ||
                 MathF.Abs(position.Y - eyeWorld.Y) > RenderRadius ||
-                !TryAppendObjMesh(uid, transform, mesh))
+                !TryAppendMesh(uid, transform, mesh))
                 continue;
 
             _renderedMeshEntities.Add(uid);
@@ -88,15 +88,20 @@ internal sealed partial class World3DGridOverlay
         }
     }
 
-    private bool TryAppendObjMesh(EntityUid uid, TransformComponent transform, Mesh3DComponent component)
+    private bool TryAppendMesh(EntityUid uid, TransformComponent transform, Mesh3DComponent component)
     {
-        if (!component.Mesh.EndsWith(".obj", StringComparison.OrdinalIgnoreCase))
-            return false;
-
-        ObjMeshResource resource;
+        IReadOnlyList<MeshSurface3D> surfaces;
         try
         {
-            if (!_resourceCache.TryGetResource(new ResPath(component.Mesh), out resource))
+            var path = new ResPath(component.Mesh);
+            if (component.Mesh.EndsWith(".obj", StringComparison.OrdinalIgnoreCase) &&
+                _resourceCache.TryGetResource<ObjMeshResource>(path, out var obj))
+                surfaces = obj.Surfaces;
+            else if ((component.Mesh.EndsWith(".gltf", StringComparison.OrdinalIgnoreCase) ||
+                      component.Mesh.EndsWith(".glb", StringComparison.OrdinalIgnoreCase)) &&
+                     _resourceCache.TryGetResource<GltfMeshResource>(path, out var gltf))
+                surfaces = gltf.Surfaces;
+            else
                 return false;
         }
         catch
@@ -104,23 +109,46 @@ internal sealed partial class World3DGridOverlay
             return false;
         }
 
-        var sourceVertices = resource.Vertices;
-        if (sourceVertices.Length == 0)
+        if (surfaces.Count == 0)
             return false;
 
-        var textureHandle = TryResolveModelTexture(component.AlbedoTexture);
-        var alpha = Math.Clamp(component.Tint.A, 0f, 1f);
-        var batches = alpha < 0.999f ? _transparentModelVertices : _opaqueModelVertices;
+        var worldMatrix = _transform3DSystem.GetWorldMatrix3D(uid, transform);
+        var worldRotation = _transform3DSystem.GetWorldRotation3D(uid, transform);
+        foreach (var surface in surfaces)
+            AppendSurface(uid, transform.MapID, component, surface, worldMatrix, worldRotation);
+        return true;
+    }
+
+    private void AppendSurface(
+        EntityUid uid,
+        MapId mapId,
+        Mesh3DComponent component,
+        MeshSurface3D surface,
+        Matrix4x4 worldMatrix,
+        Quaternion worldRotation)
+    {
+        var sourceVertices = surface.Vertices;
+        if (sourceVertices.Length == 0)
+            return;
+
+        var texturePath = string.IsNullOrWhiteSpace(component.AlbedoTexture)
+            ? surface.AlbedoTexture ?? string.Empty
+            : component.AlbedoTexture;
+        var textureHandle = TryResolveModelTexture(texturePath);
+        var materialColor = surface.BaseColor ?? Vector4.One;
+        var alpha = Math.Clamp(component.Tint.A * materialColor.W, 0f, 1f);
+        var batches = alpha < 0.999f || surface.Blend ? _transparentModelVertices : _opaqueModelVertices;
         if (!batches.TryGetValue(textureHandle, out var destination))
         {
             destination = new List<float>(sourceVertices.Length * FloatsPerVertex);
             batches.Add(textureHandle, destination);
         }
 
-        var worldMatrix = _transform3DSystem.GetWorldMatrix3D(uid, transform);
-        var worldRotation = _transform3DSystem.GetWorldRotation3D(uid, transform);
-        var albedo = new Vector3(component.Tint.R, component.Tint.G, component.Tint.B);
-        var emissive = new Vector3(component.Emissive.R, component.Emissive.G, component.Emissive.B) * component.Emissive.A;
+        var albedo = Vector3.Multiply(
+            new Vector3(component.Tint.R, component.Tint.G, component.Tint.B),
+            new Vector3(materialColor.X, materialColor.Y, materialColor.Z));
+        var emissive = new Vector3(component.Emissive.R, component.Emissive.G, component.Emissive.B) * component.Emissive.A +
+                       (surface.Emissive ?? Vector3.Zero);
 
         for (var i = 0; i + 2 < sourceVertices.Length; i += 3)
         {
@@ -134,7 +162,7 @@ internal sealed partial class World3DGridOverlay
             var normal = Vector3.Transform(localNormal, worldRotation);
             normal = normal.LengthSquared() > 1e-8f ? Vector3.Normalize(normal) : Vector3.UnitZ;
             var illumination = component.ReceiveLights
-                ? ShadeSurface3D(uid, transform.MapID, (worldA + worldB + worldC) / 3f, normal)
+                ? ShadeSurface3D(uid, mapId, (worldA + worldB + worldC) / 3f, normal)
                 : Vector3.One;
             var lit = Vector3.Min(Vector3.Multiply(albedo, illumination) + emissive, Vector3.One);
             var color = new Vector4(lit, alpha);
@@ -143,7 +171,7 @@ internal sealed partial class World3DGridOverlay
             AddVertex(destination, worldB, color, b.Uv);
             AddVertex(destination, worldC, color, c.Uv);
 
-            if (component.DoubleSided)
+            if (component.DoubleSided || surface.DoubleSided)
             {
                 AddVertex(destination, worldC, color, c.Uv);
                 AddVertex(destination, worldB, color, b.Uv);
@@ -151,7 +179,6 @@ internal sealed partial class World3DGridOverlay
             }
         }
 
-        return true;
     }
 
     private uint TryResolveModelTexture(string path)

@@ -15,9 +15,9 @@ namespace Robust.Client.ResourceManagement;
 /// </summary>
 public sealed class ObjMeshResource : BaseResource, IBaseResource
 {
-    private MeshVertex3D[] _vertices = Array.Empty<MeshVertex3D>();
+    private MeshSurface3D[] _surfaces = Array.Empty<MeshSurface3D>();
 
-    public ReadOnlySpan<MeshVertex3D> Vertices => _vertices;
+    public IReadOnlyList<MeshSurface3D> Surfaces => _surfaces;
     public override ResPath? Fallback => null;
     static bool IBaseResource.CanBeRemoved => true;
 
@@ -26,7 +26,7 @@ public sealed class ObjMeshResource : BaseResource, IBaseResource
         var resourceManager = dependencies.Resolve<IResourceManager>();
         using var stream = resourceManager.ContentFileRead(path);
         using var reader = new StreamReader(stream);
-        _vertices = Decode(reader);
+        _surfaces = [new MeshSurface3D(Decode(reader))];
     }
 
     internal static MeshVertex3D[] Decode(TextReader reader)
@@ -133,3 +133,13 @@ public sealed class ObjMeshResource : BaseResource, IBaseResource
 }
 
 public readonly record struct MeshVertex3D(Vector3 Position, Vector3? Normal, Vector2 Uv);
+
+public sealed record MeshSurface3D(
+    MeshVertex3D[] Vertices,
+    string? AlbedoTexture = null,
+    Vector4? BaseColor = null,
+    Vector3? Emissive = null,
+    float Roughness = 0.7f,
+    float Metallic = 0f,
+    bool DoubleSided = false,
+    bool Blend = false);
