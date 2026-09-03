@@ -66,6 +66,7 @@ public sealed class SharedPhysics3DSystem : EntitySystem
         RefreshJoints();
         FlushPendingJoints();
         SynchronizeTransformDrivenBodies();
+        SynchronizeGravityFields();
 
         _accumulator += Math.Clamp(frameTime, 0f, FixedTimeStep * MaximumCatchUpSteps);
         var steps = 0;
@@ -118,6 +119,40 @@ public sealed class SharedPhysics3DSystem : EntitySystem
     {
         RemoveJoint(uid);
         _pendingJoints.Add(uid);
+    }
+
+    private void SynchronizeGravityFields()
+    {
+        foreach (var (uid, registration) in _registrations)
+        {
+            if (registration.IsStatic ||
+                !TryComp(uid, out PhysicsBody3DComponent? body) ||
+                !TryComp(uid, out TransformComponent? transform) ||
+                !_worlds.TryGetValue(registration.MapId, out var world))
+                continue;
+
+            world.Dynamics.Update(registration.BodyHandle, body, GetGravity(uid, transform));
+        }
+    }
+
+    public Vector3 GetGravity(EntityUid uid, TransformComponent? transform = null)
+    {
+        if (!Resolve(uid, ref transform, false))
+            return DefaultGravity;
+
+        var root = transform.GridUid ?? transform.MapUid;
+        if (root is not { } rootUid || !TryComp(rootUid, out GravityField3DComponent? field))
+            return DefaultGravity;
+
+        if (!field.Enabled ||
+            !float.IsFinite(field.Acceleration) ||
+            field.Acceleration <= 0f ||
+            !SpatialMath.IsFinite(field.Direction) ||
+            field.Direction.LengthSquared() <= 1e-8f)
+            return Vector3.Zero;
+
+        var localDirection = Vector3.Normalize(field.Direction);
+        return Vector3.Transform(localDirection, _transform3D.GetWorldRotation3D(rootUid)) * field.Acceleration;
     }
 
     public bool TryGetBodyPose(EntityUid uid, out Vector3 position, out Quaternion rotation)
@@ -522,22 +557,27 @@ public sealed class SharedPhysics3DSystem : EntitySystem
         if (!TryGetVelocity(uid, out var linear, out var angular))
             return false;
 
+        var gravity = GetGravity(uid, transform) * body.GravityScale;
+        var hasGravity = gravity.LengthSquared() > 1e-8f;
+        var down = hasGravity ? Vector3.Normalize(gravity) : -Vector3.UnitZ;
+        var up = -down;
         var position = _transform3D.GetWorldPosition3D(uid, transform);
-        var probeOrigin = position + Vector3.UnitZ * MathF.Max(0f, character.GroundProbeStart);
+        var probeOrigin = position + up * MathF.Max(0f, character.GroundProbeStart);
         var probeLength = MathF.Max(0.01f, character.GroundProbeStart + character.GroundProbeDistance);
-        var grounded = TryRayCast(
+        PhysicsRayHit3D groundHit = default;
+        var grounded = hasGravity && TryRayCast(
                            transform.MapID,
-                           new Ray3D(probeOrigin, -Vector3.UnitZ),
+                           new Ray3D(probeOrigin, down),
                            probeLength,
                            character.GroundCollisionMask,
                            uid,
                            false,
-                           out var groundHit) &&
-                       Vector3.Dot(groundHit.Normal, Vector3.UnitZ) >=
+                           out groundHit) &&
+                       Vector3.Dot(groundHit.Normal, up) >=
                        MathF.Cos(Math.Clamp(character.MaximumSlopeDegrees, 0f, 89f) * MathF.PI / 180f);
 
         EntityUid? newGroundEntity = grounded ? groundHit.Entity : null;
-        var newGroundNormal = grounded ? groundHit.Normal : Vector3.UnitZ;
+        var newGroundNormal = grounded ? groundHit.Normal : up;
         if (character.Grounded != grounded ||
             character.GroundEntity != newGroundEntity ||
             !character.GroundNormal.Equals(newGroundNormal))
@@ -564,7 +604,8 @@ public sealed class SharedPhysics3DSystem : EntitySystem
             character.JumpRequested = false;
             if (grounded)
             {
-                linear.Z = MathF.Max(0f, character.JumpSpeed);
+                var currentUpSpeed = Vector3.Dot(linear, up);
+                linear += up * (MathF.Max(0f, character.JumpSpeed) - currentUpSpeed);
                 character.Grounded = false;
                 character.GroundEntity = null;
                 Dirty(uid, character);
@@ -1224,7 +1265,7 @@ public sealed class SharedPhysics3DSystem : EntitySystem
             shapeOffset,
             shapeRotation);
         world.CollisionProperties.Add(registration.CollidablePacked, uid, body, shapeDefinitions);
-        world.Dynamics.Add(bodyHandle, body);
+        world.Dynamics.Add(bodyHandle, body, DefaultGravity);
         return registration;
     }
 
@@ -2252,6 +2293,7 @@ public sealed class SharedPhysics3DSystem : EntitySystem
     }
 
     private readonly record struct BodyDynamics3D(
+        Vector3 Gravity,
         float GravityScale,
         float LinearDamping,
         float AngularDamping);
@@ -2260,12 +2302,18 @@ public sealed class SharedPhysics3DSystem : EntitySystem
     {
         private readonly Dictionary<int, BodyDynamics3D> _properties = new();
 
-        public void Add(BodyHandle handle, PhysicsBody3DComponent body)
+        public void Add(BodyHandle handle, PhysicsBody3DComponent body, Vector3 gravity)
         {
             _properties[handle.Value] = new BodyDynamics3D(
+                gravity,
                 float.IsFinite(body.GravityScale) ? body.GravityScale : 1f,
                 Math.Clamp(body.LinearDamping, 0f, 1f),
                 Math.Clamp(body.AngularDamping, 0f, 1f));
+        }
+
+        public void Update(BodyHandle handle, PhysicsBody3DComponent body, Vector3 gravity)
+        {
+            Add(handle, body, gravity);
         }
 
         public bool TryGet(BodyHandle handle, out BodyDynamics3D properties)
@@ -2329,12 +2377,12 @@ public sealed class SharedPhysics3DSystem : EntitySystem
 
                 var handle = _simulation.Bodies.ActiveSet.IndexToHandle[bodyIndex];
                 if (!_dynamics.TryGet(handle, out var properties))
-                    properties = new BodyDynamics3D(1f, 0f, 0f);
+                    properties = new BodyDynamics3D(Gravity, 1f, 0f, 0f);
 
                 Vector3Wide.ReadSlot(ref velocity.Linear, lane, out var linear);
                 Vector3Wide.ReadSlot(ref velocity.Angular, lane, out var angular);
                 var laneDt = dt[lane];
-                linear += Gravity * properties.GravityScale * laneDt;
+                linear += properties.Gravity * properties.GravityScale * laneDt;
                 linear *= MathF.Pow(1f - properties.LinearDamping, laneDt);
                 angular *= MathF.Pow(1f - properties.AngularDamping, laneDt);
                 Vector3Wide.WriteSlot(linear, lane, ref velocity.Linear);
