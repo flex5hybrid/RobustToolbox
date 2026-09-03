@@ -22,8 +22,8 @@ public sealed class SharedMapGrid3DPhysicsSystem : EntitySystem
     {
         base.Initialize();
         SubscribeLocalEvent<MapGrid3DComponent, MapGrid3DStartedEvent>(OnGridStartup);
-        SubscribeLocalEvent<MapGrid3DComponent, ComponentShutdown>(OnGridShutdown);
         SubscribeLocalEvent<MapGrid3DPhysicsComponent, ComponentStartup>(OnPhysicsStartup);
+        SubscribeLocalEvent<MapGrid3DPhysicsComponent, ComponentShutdown>(OnPhysicsShutdown);
         SubscribeLocalEvent<MapGrid3DComponent, GridChunkChanged3DEvent>(OnChunkChanged);
     }
 
@@ -43,12 +43,12 @@ public sealed class SharedMapGrid3DPhysicsSystem : EntitySystem
         RebuildAll((grid.Owner, mapGrid, grid.Comp));
     }
 
-    private void OnGridShutdown(Entity<MapGrid3DComponent> grid, ref ComponentShutdown args)
+    private void OnPhysicsShutdown(Entity<MapGrid3DPhysicsComponent> grid, ref ComponentShutdown args)
     {
-        if (!_network.IsServer || !TryComp(grid.Owner, out MapGrid3DPhysicsComponent? generated))
+        if (!_network.IsServer)
             return;
 
-        generated.ChunkShapes.Clear();
+        grid.Comp.ChunkShapes.Clear();
         if (TryComp(grid.Owner, out Collider3DComponent? collider))
         {
             collider.Shapes.Clear();
@@ -56,9 +56,9 @@ public sealed class SharedMapGrid3DPhysicsSystem : EntitySystem
             _physics.RefreshBody(grid.Owner);
         }
 
-        if (generated.OwnsCollider)
+        if (grid.Comp.OwnsCollider)
             RemComp<Collider3DComponent>(grid.Owner);
-        if (generated.OwnsBody)
+        if (grid.Comp.OwnsBody)
             RemComp<PhysicsBody3DComponent>(grid.Owner);
     }
 
