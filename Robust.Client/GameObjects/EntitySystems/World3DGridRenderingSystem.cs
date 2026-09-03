@@ -15,6 +15,7 @@ using Robust.Shared.Map;
 using Robust.Shared.Map.Components;
 using Robust.Shared.Maths;
 using Robust.Shared.Physics3D;
+using Robust.Shared.Timing;
 
 namespace Robust.Client.GameObjects;
 
@@ -37,6 +38,7 @@ public sealed partial class World3DGridRenderingSystem : EntitySystem
     [Dependency] private SharedPhysics3DSystem _physics3D = default!;
     [Dependency] private SharedMapGrid3DSystem _mapGrid3D = default!;
     [Dependency] private IResourceCache _resourceCache = default!;
+    [Dependency] private IGameTiming _timing = default!;
 
     private World3DGridOverlay? _overlay;
     private EntityUid? _presentationEntity;
@@ -56,7 +58,8 @@ public sealed partial class World3DGridRenderingSystem : EntitySystem
             _clyde,
             _physics3D,
             _mapGrid3D,
-            _resourceCache);
+            _resourceCache,
+            _timing);
         _overlayManager.AddOverlay(_overlay);
     }
 
@@ -186,6 +189,7 @@ internal sealed partial class World3DGridOverlay : Overlay
     private readonly SharedPhysics3DSystem _physics3D;
     private readonly SharedMapGrid3DSystem _mapGrid3D;
     private readonly IResourceCache _resourceCache;
+    private readonly IGameTiming _timing;
     private readonly List<float> _vertices = new(256 * 1024);
     private readonly List<float> _transparentVertices = new(32 * 1024);
     private readonly List<float> _tileVertices = new(256 * 1024);
@@ -223,7 +227,8 @@ internal sealed partial class World3DGridOverlay : Overlay
         IClydeInternal clyde,
         SharedPhysics3DSystem physics3D,
         SharedMapGrid3DSystem mapGrid3D,
-        IResourceCache resourceCache)
+        IResourceCache resourceCache,
+        IGameTiming timing)
     {
         _entityManager = entityManager;
         _transformSystem = transformSystem;
@@ -234,6 +239,7 @@ internal sealed partial class World3DGridOverlay : Overlay
         _physics3D = physics3D;
         _mapGrid3D = mapGrid3D;
         _resourceCache = resourceCache;
+        _timing = timing;
         _diagnosticStage = ParseDiagnosticStage(Environment.GetEnvironmentVariable("SS14_3D_DIAGNOSTIC"));
         ZIndex = int.MaxValue;
 
@@ -674,6 +680,7 @@ internal sealed partial class World3DGridOverlay : Overlay
         }
 
         AppendNative3DGrids(mapId, eyeWorld, ref gridCount);
+        AppendNative3DVisualEffects(mapId, eyeWorld, billboardRight, billboardForward);
 
         AppendEntities(
             mapId,
