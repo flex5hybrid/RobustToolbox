@@ -21,13 +21,13 @@ public sealed class SharedMapGrid3DPhysicsSystem : EntitySystem
     public override void Initialize()
     {
         base.Initialize();
-        SubscribeLocalEvent<MapGrid3DComponent, ComponentStartup>(OnGridStartup);
+        SubscribeLocalEvent<MapGrid3DComponent, MapGrid3DStartedEvent>(OnGridStartup);
         SubscribeLocalEvent<MapGrid3DComponent, ComponentShutdown>(OnGridShutdown);
         SubscribeLocalEvent<MapGrid3DPhysicsComponent, ComponentStartup>(OnPhysicsStartup);
         SubscribeLocalEvent<MapGrid3DComponent, GridChunkChanged3DEvent>(OnChunkChanged);
     }
 
-    private void OnGridStartup(Entity<MapGrid3DComponent> grid, ref ComponentStartup args)
+    private void OnGridStartup(Entity<MapGrid3DComponent> grid, ref MapGrid3DStartedEvent args)
     {
         if (!_network.IsServer || !grid.Comp.CollisionEnabled)
             return;

@@ -268,6 +268,8 @@ public sealed class SharedMapGrid3DSystem : EntitySystem
         }
 
         RegenerateBounds(grid.Comp);
+        var ev = new MapGrid3DStartedEvent();
+        RaiseLocalEvent(grid.Owner, ref ev, true);
     }
 
     private void OnGetState(EntityUid uid, MapGrid3DComponent component, ref ComponentGetState args)
@@ -446,3 +448,6 @@ public sealed class SharedMapGrid3DSystem : EntitySystem
         return result < 0 ? result + divisor : result;
     }
 }
+
+[ByRefEvent]
+public readonly record struct MapGrid3DStartedEvent;
